@@ -1,0 +1,4 @@
+onnxruntime>=1.18
+opencv-python>=4.8
+numpy>=1.23
+paddlepaddle>=2.6
