@@ -11,10 +11,10 @@ from PIL import Image, ImageDraw, ImageFont
 # CONFIGURATION
 # ============================================================
 
-# Your invalid annotations CSV
+# CSV containing invalid annotations
 CSV_FILE = r"C:\Users\q4761\Desktop\Data_analyzer\invalid_annotations.csv"
 
-# Root of your dataset
+# Root directory of your original dataset
 DATASET_ROOT = r"C:\Users\q4761\Desktop\workspace\BallDetection\balldataset"
 
 # Output directory
@@ -22,12 +22,23 @@ OUTPUT_ROOT = r"C:\Users\q4761\Desktop\workspace\BallDetection\invalid_annotatio
 
 
 # ============================================================
-# SETTINGS
+# OUTPUT DIRECTORIES
 # ============================================================
 
-ORIGINAL_ROOT = os.path.join(OUTPUT_ROOT, "original")
-VISUALIZED_ROOT = os.path.join(OUTPUT_ROOT, "visualized")
-REPORT_ROOT = os.path.join(OUTPUT_ROOT, "reports")
+ORIGINAL_ROOT = os.path.join(
+    OUTPUT_ROOT,
+    "original"
+)
+
+VISUALIZED_ROOT = os.path.join(
+    OUTPUT_ROOT,
+    "visualized"
+)
+
+REPORT_ROOT = os.path.join(
+    OUTPUT_ROOT,
+    "reports"
+)
 
 os.makedirs(ORIGINAL_ROOT, exist_ok=True)
 os.makedirs(VISUALIZED_ROOT, exist_ok=True)
@@ -40,14 +51,14 @@ os.makedirs(REPORT_ROOT, exist_ok=True)
 
 def clean_error_name(error):
     """
-    Convert CSV error names into safe folder names.
+    Convert an error name from the CSV into a safe folder name.
     """
+
     if pd.isna(error):
         return "unknown_error"
 
     error = str(error).strip()
 
-    # Keep the error name readable
     error = error.replace("/", "_")
     error = error.replace("\\", "_")
     error = error.replace(" ", "_")
@@ -55,16 +66,29 @@ def clean_error_name(error):
     return error
 
 
+def normalize_relative_path(path):
+    """
+    Normalize Windows/Linux path separators.
+    """
+
+    path = str(path)
+
+    path = path.replace("\\", os.sep)
+    path = path.replace("/", os.sep)
+
+    path = path.lstrip("\\/")
+
+    return path
+
+
 def find_image_from_json(json_path, json_data):
     """
-    Your structure is:
+    Dataset structure:
 
-        ...\labels\image.json
-                    |
-                    ---> ...\imgs\image.jpg
+        .../<sport>/labels/image.json
+        .../<sport>/imgs/image.jpg
 
-    We first use file_name from JSON.
-    Then search common image extensions.
+    Uses file_name from JSON when available.
     """
 
     file_name = json_data.get("file_name")
@@ -74,15 +98,37 @@ def find_image_from_json(json_path, json_data):
     else:
         image_name = json_path.stem
 
-    # JSON is normally inside "labels"
     json_parent = json_path.parent
 
+    # Normal dataset structure:
+    #
+    # labels/
+    # imgs/
+
     if json_parent.name.lower() == "labels":
-        image_folder = json_parent.parent / "imgs"
-    else:
+
         image_folder = json_parent.parent / "imgs"
 
-    possible_extensions = [
+    else:
+
+        image_folder = json_parent.parent / "imgs"
+
+    # --------------------------------------------------------
+    # Try exact filename
+    # --------------------------------------------------------
+
+    candidate = image_folder / image_name
+
+    if candidate.is_file():
+        return candidate
+
+    # --------------------------------------------------------
+    # Try different image extensions
+    # --------------------------------------------------------
+
+    stem = Path(image_name).stem
+
+    extensions = [
         ".jpg",
         ".jpeg",
         ".png",
@@ -93,25 +139,23 @@ def find_image_from_json(json_path, json_data):
         ".PNG",
     ]
 
-    # If JSON specifies extension
-    candidate = image_folder / image_name
+    for ext in extensions:
 
-    if candidate.is_file():
-        return candidate
-
-    # Search by stem with different extensions
-    stem = Path(image_name).stem
-
-    for ext in possible_extensions:
         candidate = image_folder / (stem + ext)
 
         if candidate.is_file():
             return candidate
 
-    # If not found, recursively search dataset
-    for ext in possible_extensions:
+    # --------------------------------------------------------
+    # Last resort: search entire dataset
+    # --------------------------------------------------------
+
+    for ext in extensions:
+
         matches = list(
-            DATASET_ROOT.rglob(stem + ext)
+            DATASET_ROOT.rglob(
+                stem + ext
+            )
         )
 
         if matches:
@@ -120,62 +164,51 @@ def find_image_from_json(json_path, json_data):
     return None
 
 
-def get_font():
-    """
-    Try to get a readable font for annotations.
-    """
+def get_font(size=18, bold=False):
 
-    possible_fonts = [
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\Arial.ttf",
-        r"C:\Windows\Fonts\calibri.ttf",
-        r"C:\Windows\Fonts\Calibri.ttf",
-    ]
+    if bold:
 
-    for font_path in possible_fonts:
+        possible_fonts = [
+            r"C:\Windows\Fonts\arialbd.ttf",
+            r"C:\Windows\Fonts\Arial_Bold.ttf",
+            r"C:\Windows\Fonts\calibrib.ttf",
+        ]
 
-        if os.path.isfile(font_path):
+    else:
 
-            try:
-                return ImageFont.truetype(
-                    font_path,
-                    18
-                )
-            except:
-                pass
-
-    return ImageFont.load_default()
-
-
-def get_large_font():
-    """
-    Larger font for error title.
-    """
-
-    possible_fonts = [
-        r"C:\Windows\Fonts\arialbd.ttf",
-        r"C:\Windows\Fonts\Arial_Bold.ttf",
-        r"C:\Windows\Fonts\calibrib.ttf",
-    ]
+        possible_fonts = [
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\Arial.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+            r"C:\Windows\Fonts\Calibri.ttf",
+        ]
 
     for font_path in possible_fonts:
 
         if os.path.isfile(font_path):
 
             try:
+
                 return ImageFont.truetype(
                     font_path,
-                    24
+                    size
                 )
-            except:
+
+            except Exception:
                 pass
 
     return ImageFont.load_default()
 
 
-def draw_text_box(draw, position, text, font, fill="red"):
+def draw_text_box(
+    draw,
+    position,
+    text,
+    font,
+    text_color="red"
+):
     """
-    Draw text with a background rectangle.
+    Draw readable text with a white background.
     """
 
     x, y = position
@@ -196,31 +229,31 @@ def draw_text_box(draw, position, text, font, fill="red"):
             bbox[3] + padding,
         ],
         fill="white",
-        outline=fill,
+        outline=text_color,
         width=2,
     )
 
     draw.text(
         (x, y),
         text,
-        fill=fill,
+        fill=text_color,
         font=font,
     )
 
 
-def safe_copy(src, dst):
+def safe_copy(source, destination):
     """
-    Copy file without modifying the source.
+    Copy file while keeping the original untouched.
     """
 
     os.makedirs(
-        os.path.dirname(dst),
+        os.path.dirname(destination),
         exist_ok=True
     )
 
     shutil.copy2(
-        src,
-        dst
+        source,
+        destination
     )
 
 
@@ -232,14 +265,20 @@ print("=" * 80)
 print("INVALID ANNOTATION REVIEW TOOL")
 print("=" * 80)
 
-print(f"\nCSV:")
-print(CSV_FILE)
+print(
+    f"\nCSV:"
+    f"\n{CSV_FILE}"
+)
 
-print(f"\nDataset:")
-print(DATASET_ROOT)
+print(
+    f"\nDataset:"
+    f"\n{DATASET_ROOT}"
+)
 
-print(f"\nOutput:")
-print(OUTPUT_ROOT)
+print(
+    f"\nOutput:"
+    f"\n{OUTPUT_ROOT}"
+)
 
 
 # ============================================================
@@ -249,14 +288,14 @@ print(OUTPUT_ROOT)
 if not os.path.isfile(CSV_FILE):
 
     raise FileNotFoundError(
-        f"\nCSV not found:\n{CSV_FILE}"
+        f"\nCSV file not found:\n{CSV_FILE}"
     )
 
 
 if not os.path.isdir(DATASET_ROOT):
 
     raise FileNotFoundError(
-        f"\nDataset root not found:\n{DATASET_ROOT}"
+        f"\nDataset directory not found:\n{DATASET_ROOT}"
     )
 
 
@@ -269,33 +308,41 @@ df = pd.read_csv(
 )
 
 print(
-    f"\nRows in CSV: {len(df):,}"
+    f"\nCSV rows found: {len(df):,}"
 )
 
 
 # ============================================================
-# CHECK COLUMNS
+# CHECK REQUIRED COLUMNS
 # ============================================================
 
-if "file" not in df.columns:
+required_columns = [
+    "file",
+    "error"
+]
+
+missing_columns = [
+    column
+    for column in required_columns
+    if column not in df.columns
+]
+
+if missing_columns:
 
     raise ValueError(
-        "\nCSV must contain a 'file' column."
+        "\nMissing required CSV columns: "
+        + str(missing_columns)
+        + "\nAvailable columns: "
+        + str(list(df.columns))
     )
 
 
-if "error" not in df.columns:
-
-    raise ValueError(
-        "\nCSV must contain an 'error' column."
-    )
-
-
 # ============================================================
-# VARIABLES
+# REPORT STORAGE
 # ============================================================
 
 summary_rows = []
+
 bbox_rows = []
 
 images_processed = 0
@@ -305,22 +352,33 @@ json_copied = 0
 missing_json = 0
 missing_image = 0
 
-json_errors = 0
+invalid_json = 0
+image_open_errors = 0
 
 
 # ============================================================
-# PROCESS EACH CSV ROW
+# PROCESS EVERY CSV ROW
 # ============================================================
 
 for row_number, row in df.iterrows():
 
-    csv_file = str(row["file"]).strip()
-    csv_error = clean_error_name(row["error"])
-
-    print("\n" + "-" * 80)
+    print("\n")
+    print("-" * 80)
 
     print(
         f"[{row_number + 1}/{len(df)}]"
+    )
+
+    # --------------------------------------------------------
+    # CSV VALUES
+    # --------------------------------------------------------
+
+    csv_file = str(
+        row["file"]
+    ).strip()
+
+    csv_error = clean_error_name(
+        row["error"]
     )
 
     print(
@@ -328,40 +386,30 @@ for row_number, row in df.iterrows():
     )
 
     print(
-        f"File  : {csv_file}"
+        f"JSON  : {csv_file}"
     )
 
     # --------------------------------------------------------
     # NORMALIZE PATH
     # --------------------------------------------------------
 
-    relative_path = csv_file.replace(
-        "\\",
-        os.sep
+    relative_path = normalize_relative_path(
+        csv_file
     )
-
-    relative_path = relative_path.replace(
-        "/",
-        os.sep
-    )
-
-    relative_path = relative_path.lstrip(
-        "\\/"
-    )
-
-    # --------------------------------------------------------
-    # JSON PATH
-    # --------------------------------------------------------
 
     json_path = os.path.join(
         DATASET_ROOT,
         relative_path
     )
 
+    # --------------------------------------------------------
+    # CHECK JSON
+    # --------------------------------------------------------
+
     if not os.path.isfile(json_path):
 
         print(
-            "[WARNING] JSON not found:"
+            "[MISSING JSON]"
         )
 
         print(
@@ -371,17 +419,26 @@ for row_number, row in df.iterrows():
         missing_json += 1
 
         summary_rows.append({
-            "csv_row": row_number + 1,
-            "json_file": csv_file,
-            "error": csv_error,
-            "status": "missing_json",
+
+            "csv_row":
+                row_number + 1,
+
+            "json_file":
+                csv_file,
+
+            "error":
+                csv_error,
+
+            "status":
+                "missing_json",
+
         })
 
         continue
 
-    # --------------------------------------------------------
+    # ========================================================
     # LOAD JSON
-    # --------------------------------------------------------
+    # ========================================================
 
     try:
 
@@ -391,47 +448,65 @@ for row_number, row in df.iterrows():
             encoding="utf-8"
         ) as f:
 
-            data = json.load(f)
+            json_data = json.load(f)
 
     except Exception as e:
 
         print(
-            f"[ERROR] Cannot read JSON: {e}"
+            f"[INVALID JSON] {e}"
         )
 
-        json_errors += 1
+        invalid_json += 1
 
         summary_rows.append({
-            "csv_row": row_number + 1,
-            "json_file": csv_file,
-            "error": csv_error,
-            "status": "invalid_json",
+
+            "csv_row":
+                row_number + 1,
+
+            "json_file":
+                csv_file,
+
+            "error":
+                csv_error,
+
+            "status":
+                "invalid_json",
+
         })
 
         continue
 
-    # --------------------------------------------------------
+    # ========================================================
     # FIND IMAGE
-    # --------------------------------------------------------
+    # ========================================================
 
     image_path = find_image_from_json(
         Path(json_path),
-        data
+        json_data
     )
 
     if image_path is None:
 
         print(
-            "[WARNING] Corresponding image not found."
+            "[MISSING IMAGE]"
         )
 
         missing_image += 1
 
         summary_rows.append({
-            "csv_row": row_number + 1,
-            "json_file": csv_file,
-            "error": csv_error,
-            "status": "missing_image",
+
+            "csv_row":
+                row_number + 1,
+
+            "json_file":
+                csv_file,
+
+            "error":
+                csv_error,
+
+            "status":
+                "missing_image",
+
         })
 
         continue
@@ -441,22 +516,25 @@ for row_number, row in df.iterrows():
     )
 
     # ========================================================
-    # COPY ORIGINAL JSON + IMAGE
+    # COPY ORIGINAL JSON AND IMAGE
     # ========================================================
 
-    original_error_dir = os.path.join(
+    original_error_folder = os.path.join(
         ORIGINAL_ROOT,
         csv_error
     )
 
     os.makedirs(
-        original_error_dir,
+        original_error_folder,
         exist_ok=True
     )
 
-    # Copy JSON
+    # --------------------------------------------------------
+    # COPY JSON
+    # --------------------------------------------------------
+
     destination_json = os.path.join(
-        original_error_dir,
+        original_error_folder,
         os.path.basename(json_path)
     )
 
@@ -472,12 +550,15 @@ for row_number, row in df.iterrows():
     except Exception as e:
 
         print(
-            f"[ERROR] JSON copy failed: {e}"
+            f"[JSON COPY ERROR] {e}"
         )
 
-    # Copy image
+    # --------------------------------------------------------
+    # COPY IMAGE
+    # --------------------------------------------------------
+
     destination_image = os.path.join(
-        original_error_dir,
+        original_error_folder,
         image_path.name
     )
 
@@ -493,7 +574,7 @@ for row_number, row in df.iterrows():
     except Exception as e:
 
         print(
-            f"[ERROR] Image copy failed: {e}"
+            f"[IMAGE COPY ERROR] {e}"
         )
 
     # ========================================================
@@ -511,23 +592,37 @@ for row_number, row in df.iterrows():
     except Exception as e:
 
         print(
-            f"[ERROR] Cannot open image: {e}"
+            f"[IMAGE OPEN ERROR] {e}"
         )
 
+        image_open_errors += 1
+
         summary_rows.append({
-            "csv_row": row_number + 1,
-            "json_file": csv_file,
-            "error": csv_error,
-            "status": "cannot_open_image",
+
+            "csv_row":
+                row_number + 1,
+
+            "json_file":
+                csv_file,
+
+            "image_file":
+                str(image_path),
+
+            "error":
+                csv_error,
+
+            "status":
+                "image_open_error",
+
         })
 
         continue
 
     # ========================================================
-    # JSON DECLARED DIMENSIONS
+    # JSON DIMENSIONS
     # ========================================================
 
-    declared_dimensions = data.get(
+    declared_dimensions = json_data.get(
         "dimensions"
     )
 
@@ -537,12 +632,27 @@ for row_number, row in df.iterrows():
     dimension_mismatch = False
 
     if (
-        isinstance(declared_dimensions, list)
+        isinstance(
+            declared_dimensions,
+            list
+        )
         and len(declared_dimensions) >= 2
     ):
 
-        declared_height = declared_dimensions[0]
-        declared_width = declared_dimensions[1]
+        # Your JSON:
+        #
+        # "dimensions": [
+        #     height,
+        #     width
+        # ]
+
+        declared_height = float(
+            declared_dimensions[0]
+        )
+
+        declared_width = float(
+            declared_dimensions[1]
+        )
 
         if (
             declared_width != actual_width
@@ -552,18 +662,8 @@ for row_number, row in df.iterrows():
             dimension_mismatch = True
 
     # ========================================================
-    # VISUALIZATION
+    # CREATE VISUALIZATION
     # ========================================================
-
-    visualized_error_dir = os.path.join(
-        VISUALIZED_ROOT,
-        csv_error
-    )
-
-    os.makedirs(
-        visualized_error_dir,
-        exist_ok=True
-    )
 
     visual = image.copy()
 
@@ -571,17 +671,32 @@ for row_number, row in df.iterrows():
         visual
     )
 
-    font = get_font()
-    large_font = get_large_font()
+    normal_font = get_font(
+        18,
+        bold=False
+    )
+
+    large_font = get_font(
+        24,
+        bold=True
+    )
 
     # --------------------------------------------------------
-    # Header
+    # HEADER
     # --------------------------------------------------------
 
     header_lines = [
+
         f"ERROR: {csv_error}",
+
         f"Image: {image_path.name}",
-        f"Actual size: {actual_width} x {actual_height}",
+
+        (
+            f"Actual size: "
+            f"{actual_width} x "
+            f"{actual_height}"
+        ),
+
     ]
 
     if (
@@ -590,28 +705,47 @@ for row_number, row in df.iterrows():
     ):
 
         header_lines.append(
-            f"JSON size: {declared_width} x {declared_height}"
+
+            f"JSON size: "
+            f"{int(declared_width)} x "
+            f"{int(declared_height)}"
+
         )
 
     header_y = 10
 
-    for line in header_lines:
+    for line_number, line in enumerate(
+        header_lines
+    ):
 
         draw_text_box(
+
             draw,
-            (10, header_y),
+
+            (
+                10,
+                header_y
+            ),
+
             line,
-            large_font if line.startswith("ERROR") else font,
-            fill="red"
+
+            (
+                large_font
+                if line_number == 0
+                else normal_font
+            ),
+
+            "red"
+
         )
 
-        header_y += 32
+        header_y += 35
 
     # ========================================================
-    # PARSE DATA
+    # PARSE ANNOTATIONS
     # ========================================================
 
-    object_data = data.get(
+    object_data = json_data.get(
         "data",
         {}
     )
@@ -619,32 +753,44 @@ for row_number, row in df.iterrows():
     total_boxes = 0
     invalid_boxes = 0
 
-    # --------------------------------------------------------
-    # Check empty labels
-    # --------------------------------------------------------
+    # ========================================================
+    # EMPTY LABEL CHECK
+    # ========================================================
 
     if not object_data:
 
         print(
-            "[INFO] Empty labels / no annotation data."
+            "[EMPTY LABEL DATA]"
         )
 
     # ========================================================
-    # PROCESS CLASSES
+    # CLASSES
     # ========================================================
 
     for class_name, objects in object_data.items():
 
-        if not isinstance(objects, list):
+        if not isinstance(
+            objects,
+            list
+        ):
             continue
 
-        for object_index, obj in enumerate(objects):
+        # ----------------------------------------------------
+        # OBJECTS
+        # ----------------------------------------------------
 
-            if not isinstance(obj, dict):
+        for object_index, obj in enumerate(
+            objects
+        ):
+
+            if not isinstance(
+                obj,
+                dict
+            ):
                 continue
 
             # ------------------------------------------------
-            # "entire"
+            # ENTIRE
             # ------------------------------------------------
 
             entire = obj.get(
@@ -652,119 +798,183 @@ for row_number, row in df.iterrows():
                 {}
             )
 
-            if not isinstance(entire, dict):
+            if not isinstance(
+                entire,
+                dict
+            ):
                 continue
+
+            # ------------------------------------------------
+            # RECT
+            #
+            # IMPORTANT:
+            #
+            # [x1, y1, x2, y2]
+            # ------------------------------------------------
 
             rect = entire.get(
                 "rect"
             )
 
-            if not isinstance(rect, list):
+            if not isinstance(
+                rect,
+                list
+            ):
                 continue
 
             if len(rect) != 4:
+
+                print(
+                    "[INVALID RECT]"
+                    f" {rect}"
+                )
+
                 continue
 
             try:
 
-                x = float(rect[0])
-                y = float(rect[1])
-                w = float(rect[2])
-                h = float(rect[3])
+                x1 = float(
+                    rect[0]
+                )
+
+                y1 = float(
+                    rect[1]
+                )
+
+                x2 = float(
+                    rect[2]
+                )
+
+                y2 = float(
+                    rect[3]
+                )
 
             except Exception:
+
+                print(
+                    "[INVALID RECT VALUES]"
+                )
 
                 continue
 
             total_boxes += 1
 
-            # ------------------------------------------------
-            # x, y, w, h
-            #
-            # NOT x1,y1,x2,y2
-            # ------------------------------------------------
-
-            x2 = x + w
-            y2 = y + h
-
-            # ------------------------------------------------
+            # ====================================================
             # VALIDATION
-            # ------------------------------------------------
+            # ====================================================
 
-            errors_for_box = []
+            box_errors = []
 
-            if x < 0 or y < 0:
+            # ----------------------------------------------------
+            # NEGATIVE COORDINATES
+            # ----------------------------------------------------
 
-                errors_for_box.append(
+            if (
+                x1 < 0
+                or y1 < 0
+                or x2 < 0
+                or y2 < 0
+            ):
+
+                box_errors.append(
                     "negative_coordinate"
                 )
 
-            if w <= 0 or h <= 0:
+            # ----------------------------------------------------
+            # INVALID X
+            # ----------------------------------------------------
 
-                errors_for_box.append(
-                    "invalid_bbox_size"
+            if x2 <= x1:
+
+                box_errors.append(
+                    "invalid_x_coordinates"
                 )
 
-            if x2 > actual_width:
+            # ----------------------------------------------------
+            # INVALID Y
+            # ----------------------------------------------------
 
-                errors_for_box.append(
+            if y2 <= y1:
+
+                box_errors.append(
+                    "invalid_y_coordinates"
+                )
+
+            # ----------------------------------------------------
+            # IMAGE WIDTH
+            # ----------------------------------------------------
+
+            if (
+                x1 > actual_width
+                or x2 > actual_width
+            ):
+
+                box_errors.append(
                     "exceeds_image_width"
                 )
 
-            if y2 > actual_height:
+            # ----------------------------------------------------
+            # IMAGE HEIGHT
+            # ----------------------------------------------------
 
-                errors_for_box.append(
+            if (
+                y1 > actual_height
+                or y2 > actual_height
+            ):
+
+                box_errors.append(
                     "exceeds_image_height"
                 )
 
+            # ----------------------------------------------------
+            # COMPLETELY OUTSIDE IMAGE
+            # ----------------------------------------------------
+
             if (
-                x >= actual_width
-                or y >= actual_height
+                x2 <= 0
+                or y2 <= 0
+                or x1 >= actual_width
+                or y1 >= actual_height
             ):
 
-                errors_for_box.append(
+                box_errors.append(
                     "bbox_outside_image"
                 )
 
-            # ------------------------------------------------
-            # Is this box invalid?
-            # ------------------------------------------------
+            # ----------------------------------------------------
+            # INVALID BOX?
+            # ----------------------------------------------------
 
             is_invalid = (
-                len(errors_for_box) > 0
+                len(box_errors) > 0
             )
 
             if is_invalid:
 
                 invalid_boxes += 1
 
-            # ------------------------------------------------
-            # COLOR
-            # ------------------------------------------------
+            # ====================================================
+            # DRAWING
+            # ====================================================
 
             if is_invalid:
 
-                outline_color = "red"
-                text_color = "red"
+                box_color = "red"
 
             else:
 
-                outline_color = "lime"
-                text_color = "green"
+                box_color = "lime"
 
-            # ------------------------------------------------
-            # DRAW RECTANGLE
-            # ------------------------------------------------
-
-            # Clamp only the visualization coordinates.
+            # ----------------------------------------------------
+            # CLIP ONLY FOR VISUALIZATION
             #
-            # The original coordinates are preserved in
-            # the JSON and CSV.
+            # Original coordinates are NOT changed.
+            # ----------------------------------------------------
 
             draw_x1 = max(
                 0,
                 min(
-                    int(x),
+                    int(x1),
                     actual_width - 1
                 )
             )
@@ -772,7 +982,7 @@ for row_number, row in df.iterrows():
             draw_y1 = max(
                 0,
                 min(
-                    int(y),
+                    int(y1),
                     actual_height - 1
                 )
             )
@@ -793,34 +1003,58 @@ for row_number, row in df.iterrows():
                 )
             )
 
-            if draw_x2 > draw_x1 and draw_y2 > draw_y1:
+            # ----------------------------------------------------
+            # DRAW RECTANGLE
+            # ----------------------------------------------------
+
+            if (
+                draw_x2 > draw_x1
+                and draw_y2 > draw_y1
+            ):
 
                 draw.rectangle(
+
                     [
                         draw_x1,
                         draw_y1,
                         draw_x2,
                         draw_y2,
                     ],
-                    outline=outline_color,
-                    width=4,
+
+                    outline=box_color,
+
+                    width=4
+
                 )
 
-            # ------------------------------------------------
-            # LABEL
-            # ------------------------------------------------
+            # ====================================================
+            # BBOX LABEL
+            # ====================================================
 
             bbox_label = (
+
                 f"{class_name} | "
-                f"x={x:g}, y={y:g}, "
-                f"w={w:g}, h={h:g}"
+
+                f"x1={x1:g}, "
+
+                f"y1={y1:g}, "
+
+                f"x2={x2:g}, "
+
+                f"y2={y2:g}"
+
             )
 
-            if errors_for_box:
+            if box_errors:
 
                 bbox_label += (
+
                     " | "
-                    + ", ".join(errors_for_box)
+
+                    + ", ".join(
+                        box_errors
+                    )
+
                 )
 
             label_y = max(
@@ -829,19 +1063,25 @@ for row_number, row in df.iterrows():
             )
 
             draw_text_box(
+
                 draw,
+
                 (
                     draw_x1,
                     label_y
                 ),
+
                 bbox_label,
-                font,
-                fill=text_color
+
+                normal_font,
+
+                box_color
+
             )
 
-            # ------------------------------------------------
-            # SAVE BBOX REPORT
-            # ------------------------------------------------
+            # ====================================================
+            # BBOX CSV
+            # ====================================================
 
             bbox_rows.append({
 
@@ -863,17 +1103,11 @@ for row_number, row in df.iterrows():
                 "object_index":
                     object_index,
 
-                "x":
-                    x,
+                "x1":
+                    x1,
 
-                "y":
-                    y,
-
-                "width":
-                    w,
-
-                "height":
-                    h,
+                "y1":
+                    y1,
 
                 "x2":
                     x2,
@@ -888,50 +1122,63 @@ for row_number, row in df.iterrows():
                     actual_height,
 
                 "negative_coordinate":
-                    "negative_coordinate"
-                    in errors_for_box,
+                    (
+                        "negative_coordinate"
+                        in box_errors
+                    ),
 
                 "exceeds_width":
-                    "exceeds_image_width"
-                    in errors_for_box,
+                    (
+                        "exceeds_image_width"
+                        in box_errors
+                    ),
 
                 "exceeds_height":
-                    "exceeds_image_height"
-                    in errors_for_box,
+                    (
+                        "exceeds_image_height"
+                        in box_errors
+                    ),
 
                 "bbox_outside_image":
-                    "bbox_outside_image"
-                    in errors_for_box,
+                    (
+                        "bbox_outside_image"
+                        in box_errors
+                    ),
 
                 "bbox_valid":
                     not is_invalid,
 
                 "calculated_errors":
-                    ";".join(errors_for_box),
+                    ";".join(
+                        box_errors
+                    ),
+
             })
 
     # ========================================================
-    # DIMENSION MISMATCH REPORT
+    # DIMENSION MISMATCH
     # ========================================================
 
     if dimension_mismatch:
 
         print(
-            "[WARNING] Declared dimensions mismatch:"
+            "[DIMENSION MISMATCH]"
         )
 
         print(
-            f"  JSON    : "
-            f"{declared_width} x {declared_height}"
+            f"JSON dimensions   : "
+            f"{int(declared_width)} x "
+            f"{int(declared_height)}"
         )
 
         print(
-            f"  Actual  : "
-            f"{actual_width} x {actual_height}"
+            f"Actual dimensions : "
+            f"{actual_width} x "
+            f"{actual_height}"
         )
 
     # ========================================================
-    # SUMMARY
+    # SUMMARY ROW
     # ========================================================
 
     summary_rows.append({
@@ -971,14 +1218,25 @@ for row_number, row in df.iterrows():
 
         "status":
             "processed",
+
     })
 
     # ========================================================
     # SAVE VISUALIZED IMAGE
     # ========================================================
 
+    visualized_error_folder = os.path.join(
+        VISUALIZED_ROOT,
+        csv_error
+    )
+
+    os.makedirs(
+        visualized_error_folder,
+        exist_ok=True
+    )
+
     visualized_path = os.path.join(
-        visualized_error_dir,
+        visualized_error_folder,
         image_path.name
     )
 
@@ -990,7 +1248,7 @@ for row_number, row in df.iterrows():
         )
 
         print(
-            f"[OK] Visualization saved:"
+            "[OK] Visualization:"
         )
 
         print(
@@ -1000,7 +1258,7 @@ for row_number, row in df.iterrows():
     except Exception as e:
 
         print(
-            f"[ERROR] Visualization failed: {e}"
+            f"[VISUALIZATION ERROR] {e}"
         )
 
     images_processed += 1
@@ -1021,12 +1279,13 @@ summary_df = pd.DataFrame(
 
 summary_df.to_csv(
     summary_csv,
-    index=False
+    index=False,
+    encoding="utf-8-sig"
 )
 
 
 # ============================================================
-# SAVE BBOX CSV
+# SAVE BBOX DETAILS CSV
 # ============================================================
 
 bbox_csv = os.path.join(
@@ -1040,12 +1299,42 @@ bbox_df = pd.DataFrame(
 
 bbox_df.to_csv(
     bbox_csv,
-    index=False
+    index=False,
+    encoding="utf-8-sig"
 )
 
 
 # ============================================================
-# FINAL SUMMARY
+# ERROR TYPE SUMMARY
+# ============================================================
+
+error_summary = (
+    df["error"]
+    .fillna("unknown_error")
+    .astype(str)
+    .value_counts()
+    .reset_index()
+)
+
+error_summary.columns = [
+    "error",
+    "count"
+]
+
+error_summary_csv = os.path.join(
+    REPORT_ROOT,
+    "error_type_summary.csv"
+)
+
+error_summary.to_csv(
+    error_summary_csv,
+    index=False,
+    encoding="utf-8-sig"
+)
+
+
+# ============================================================
+# FINAL TERMINAL REPORT
 # ============================================================
 
 print("\n")
@@ -1054,7 +1343,7 @@ print("PROCESSING COMPLETE")
 print("=" * 80)
 
 print(
-    f"\nCSV rows                 : {len(df):,}"
+    f"\nCSV rows processed       : {len(df):,}"
 )
 
 print(
@@ -1078,7 +1367,11 @@ print(
 )
 
 print(
-    f"Invalid JSON files       : {json_errors:,}"
+    f"Invalid JSON             : {invalid_json:,}"
+)
+
+print(
+    f"Image open errors        : {image_open_errors:,}"
 )
 
 print(
@@ -1086,24 +1379,49 @@ print(
 )
 
 print("\n")
-print("OUTPUT:")
-print(
-    OUTPUT_ROOT
-)
+print("=" * 80)
+print("ERROR DISTRIBUTION")
+print("=" * 80)
+
+for _, error_row in error_summary.iterrows():
+
+    print(
+        f"{error_row['error']:<45}"
+        f"{int(error_row['count']):>8,}"
+    )
+
 
 print("\n")
-print("SUMMARY CSV:")
+print("=" * 80)
+print("OUTPUT FILES")
+print("=" * 80)
+
 print(
-    summary_csv
+    f"\nOriginal copies:"
+    f"\n{ORIGINAL_ROOT}"
 )
 
-print("\n")
-print("BBOX CSV:")
 print(
-    bbox_csv
+    f"\nVisualized images:"
+    f"\n{VISUALIZED_ROOT}"
+)
+
+print(
+    f"\nSummary CSV:"
+    f"\n{summary_csv}"
+)
+
+print(
+    f"\nBBox details CSV:"
+    f"\n{bbox_csv}"
+)
+
+print(
+    f"\nError summary CSV:"
+    f"\n{error_summary_csv}"
 )
 
 print("\n")
 print("=" * 80)
-print("ORIGINAL DATASET WAS NOT MODIFIED")
+print("IMPORTANT: ORIGINAL DATASET WAS NOT MODIFIED")
 print("=" * 80)
