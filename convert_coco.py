@@ -1,8 +1,10 @@
 import json
 import random
 import shutil
+import csv
 from pathlib import Path
 from collections import Counter
+
 from PIL import Image
 
 
@@ -10,19 +12,12 @@ from PIL import Image
 # CONFIGURATION
 # ============================================================
 
-# ------------------------------------------------------------
-# CHANGE THESE TWO PATHS IF NEEDED
-# ------------------------------------------------------------
-
 SOURCE_ROOT = Path("/home/eng_megha/balldataset")
 
 OUTPUT_ROOT = Path("/home/eng_megha/balldataset_coco")
 
 
-# ------------------------------------------------------------
-# ONLY THESE CASES WILL BE USED
-# ------------------------------------------------------------
-
+# Only these folders
 SELECTED_CASES = [
     "AI_train_caseB",
     "basic_train_caseA",
@@ -31,10 +26,7 @@ SELECTED_CASES = [
 ]
 
 
-# ------------------------------------------------------------
-# THESE FOLDERS WILL NEVER BE USED
-# ------------------------------------------------------------
-
+# Explicitly ignored folders
 EXCLUDED_FOLDERS = {
     "aug",
     "other",
@@ -42,25 +34,57 @@ EXCLUDED_FOLDERS = {
 }
 
 
-# ------------------------------------------------------------
-# SPLIT
-# ------------------------------------------------------------
-
+# Split
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.20
 TEST_RATIO = 0.10
 
 
-# ------------------------------------------------------------
-# RANDOM SEED
-# ------------------------------------------------------------
-
+# Reproducibility
 RANDOM_SEED = 42
 
 
+# ============================================================
+# IMPORTANT ANNOTATION SETTINGS
+# ============================================================
+
+# Your source annotation is assumed to be:
+#
+#     [x1, y1, x2, y2]
+#
+# NOT COCO format.
+#
+SOURCE_RECT_FORMAT = "xyxy"
+
+
 # ------------------------------------------------------------
-# IMAGE TYPES
+# Rotation handling
 # ------------------------------------------------------------
+#
+# "auto" tries to determine whether the annotation appears
+# to correspond to a rotated coordinate system.
+#
+# You can later force:
+#
+#     0
+#     90
+#     180
+#     270
+#
+# if we determine the dataset's exact convention.
+#
+ROTATION = "auto"
+
+
+# ------------------------------------------------------------
+# IMPORTANT:
+#
+# Do not automatically accept a rotation just because it
+# produces numbers inside the image.
+#
+# Auto mode will flag ambiguous cases for inspection.
+# ------------------------------------------------------------
+
 
 IMAGE_EXTENSIONS = {
     ".jpg",
@@ -68,15 +92,12 @@ IMAGE_EXTENSIONS = {
     ".png",
     ".bmp",
     ".webp",
-    ".JPG",
-    ".JPEG",
-    ".PNG",
 }
 
 
-# ------------------------------------------------------------
+# ============================================================
 # COCO CATEGORY
-# ------------------------------------------------------------
+# ============================================================
 
 CATEGORIES = [
     {
@@ -88,18 +109,12 @@ CATEGORIES = [
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# PATH HELPERS
 # ============================================================
 
-def is_excluded_path(path):
+def is_excluded(path):
     """
-    Returns True if any folder in the path is explicitly
-    excluded.
-
-    Examples:
-        aug
-        other
-        volleyball
+    Check whether any component of a path is excluded.
     """
 
     for part in path.parts:
@@ -110,24 +125,18 @@ def is_excluded_path(path):
     return False
 
 
-# ------------------------------------------------------------
+# ============================================================
+# FIND IMAGE + JSON PAIRS
+# ============================================================
 
-def find_image_label_pairs():
-    """
-    Find all:
-
-        imgs/
-        labels/
-
-    pairs inside the selected case folders.
-    """
+def find_pairs():
 
     pairs = []
 
     missing_labels = []
 
     print("\n" + "=" * 70)
-    print("SEARCHING FOR IMAGES AND LABELS")
+    print("SEARCHING DATASET")
     print("=" * 70)
 
     for case_name in SELECTED_CASES:
@@ -137,74 +146,61 @@ def find_image_label_pairs():
         if not case_root.exists():
 
             print(
-                f"\n[WARNING] Case folder does not exist:"
-                f"\n          {case_root}"
+                f"\n[WARNING] Missing case:"
+                f"\n{case_root}"
             )
 
             continue
 
-        print(f"\nCASE: {case_name}")
-
-        # Find all imgs directories recursively
-        imgs_dirs = []
-
-        for path in case_root.rglob("imgs"):
-
-            if not path.is_dir():
-                continue
-
-            if is_excluded_path(path):
-                continue
-
-            imgs_dirs.append(path)
-
         print(
-            f"  Found {len(imgs_dirs)} imgs directories"
+            f"\nScanning: {case_name}"
         )
+
+        imgs_dirs = [
+            p
+            for p in case_root.rglob("imgs")
+            if p.is_dir()
+            and not is_excluded(p)
+        ]
 
         for imgs_dir in sorted(imgs_dirs):
 
-            labels_dir = imgs_dir.parent / "labels"
+            labels_dir = (
+                imgs_dir.parent /
+                "labels"
+            )
 
             if not labels_dir.exists():
 
                 print(
-                    f"\n  [WARNING] Labels directory missing:"
-                    f"\n            {labels_dir}"
+                    f"\n[WARNING] Missing labels:"
+                    f"\n{labels_dir}"
                 )
 
                 continue
 
-            for image_path in sorted(imgs_dir.iterdir()):
+            for image_path in sorted(
+                imgs_dir.iterdir()
+            ):
 
                 if not image_path.is_file():
                     continue
 
-                if image_path.suffix.lower() not in {
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".bmp",
-                    ".webp",
-                }:
+                if (
+                    image_path.suffix.lower()
+                    not in IMAGE_EXTENSIONS
+                ):
                     continue
 
-                # ------------------------------------------------
-                # Find corresponding JSON
-                # ------------------------------------------------
-
-                label_path = (
+                json_path = (
                     labels_dir /
                     f"{image_path.stem}.json"
                 )
 
-                if not label_path.exists():
+                if not json_path.exists():
 
-                    missing_labels.append(image_path)
-
-                    print(
-                        f"  [MISSING LABEL] "
-                        f"{image_path}"
+                    missing_labels.append(
+                        str(image_path)
                     )
 
                     continue
@@ -212,325 +208,702 @@ def find_image_label_pairs():
                 pairs.append(
                     {
                         "image": image_path,
-                        "label": label_path,
+                        "json": json_path,
                         "case": case_name,
                     }
                 )
 
-    return pairs, missing_labels
+    print(
+        f"\nImage/JSON pairs found: "
+        f"{len(pairs)}"
+    )
+
+    print(
+        f"Missing JSON files: "
+        f"{len(missing_labels)}"
+    )
+
+    return pairs
 
 
-# ------------------------------------------------------------
+# ============================================================
+# LOAD JSON
+# ============================================================
 
-def load_json(json_path):
+def load_json(path):
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8"
+    ) as f:
+
+        return json.load(f)
+
+
+# ============================================================
+# IMAGE DIMENSIONS
+# ============================================================
+
+def get_actual_dimensions(image_path):
+
+    with Image.open(image_path) as img:
+
+        return img.size
+
+
+# ============================================================
+# ROTATION FUNCTIONS
+# ============================================================
+
+def rotate_box(
+    box,
+    width,
+    height,
+    rotation,
+):
     """
-    Load one annotation JSON.
+    Convert an XYXY box from a rotated coordinate system
+    back into the original image coordinate system.
+
+    Input:
+        box = [x1, y1, x2, y2]
+
+    rotation:
+        0
+        90
+        180
+        270
+
+    The formulas operate on all four corners, which is safer
+    than trying to transform only x1/y1/x2/y2.
     """
 
-    try:
+    x1, y1, x2, y2 = box
 
-        with open(
-            json_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
+    corners = [
+        (x1, y1),
+        (x2, y1),
+        (x2, y2),
+        (x1, y2),
+    ]
 
-            return json.load(f)
+    transformed = []
 
-    except Exception as e:
+    for x, y in corners:
 
-        print(
-            f"\n[ERROR] Could not read JSON:"
-            f"\n        {json_path}"
-            f"\n        {e}"
+        if rotation == 0:
+
+            nx = x
+            ny = y
+
+        elif rotation == 90:
+
+            # 90 degrees clockwise
+            nx = height - y
+            ny = x
+
+        elif rotation == 180:
+
+            nx = width - x
+            ny = height - y
+
+        elif rotation == 270:
+
+            # 90 degrees counter-clockwise
+            nx = y
+            ny = width - x
+
+        else:
+
+            raise ValueError(
+                f"Unsupported rotation: {rotation}"
+            )
+
+        transformed.append(
+            (nx, ny)
         )
 
-        return None
+    xs = [
+        p[0]
+        for p in transformed
+    ]
 
-
-# ------------------------------------------------------------
-
-def get_image_dimensions(image_path):
-    """
-    Read the actual pixel dimensions from the image.
-
-    Returns:
-        width, height
-    """
-
-    try:
-
-        with Image.open(image_path) as img:
-
-            width, height = img.size
-
-        return width, height
-
-    except Exception as e:
-
-        print(
-            f"\n[ERROR] Could not open image:"
-            f"\n        {image_path}"
-            f"\n        {e}"
-        )
-
-        return None, None
-
-
-# ------------------------------------------------------------
-
-def get_annotation_dimensions(annotation):
-    """
-    Your JSON format is:
-
-        "dimensions": [
-            576,
-            384
-        ]
-
-    We interpret this as:
-
-        width  = 576
-        height = 384
-    """
-
-    dimensions = annotation.get("dimensions")
-
-    if (
-        not isinstance(dimensions, list)
-        or len(dimensions) != 2
-    ):
-
-        return None, None
-
-    width = int(dimensions[0])
-    height = int(dimensions[1])
-
-    return width, height
-
-
-# ------------------------------------------------------------
-
-def convert_bbox_to_coco(rect):
-    """
-    IMPORTANT:
-
-    Your dataset rect is:
-
-        [x, y, width, height]
-
-    COCO uses exactly the same representation:
-
-        [x, y, width, height]
-
-    Therefore NO subtraction is performed.
-    """
-
-    if (
-        not isinstance(rect, list)
-        or len(rect) != 4
-    ):
-
-        return None
-
-    x = float(rect[0])
-    y = float(rect[1])
-    width = float(rect[2])
-    height = float(rect[3])
+    ys = [
+        p[1]
+        for p in transformed
+    ]
 
     return [
-        x,
-        y,
-        width,
-        height,
+        min(xs),
+        min(ys),
+        max(xs),
+        max(ys),
     ]
 
 
-# ------------------------------------------------------------
+# ============================================================
+# NORMALIZE XYXY
+# ============================================================
 
-def validate_bbox(
-    bbox,
-    image_width,
-    image_height,
-    image_name,
+def normalize_xyxy(box):
+
+    x1, y1, x2, y2 = box
+
+    return [
+        min(x1, x2),
+        min(y1, y2),
+        max(x1, x2),
+        max(y1, y2),
+    ]
+
+
+# ============================================================
+# VALIDATE BOX
+# ============================================================
+
+def validate_box(
+    box,
+    width,
+    height,
 ):
-    """
-    Validate COCO bbox.
 
-    Expected:
-
-        x >= 0
-        y >= 0
-        width > 0
-        height > 0
-        x + width <= image_width
-        y + height <= image_height
-    """
-
-    if bbox is None:
-
+    if box is None:
         return False
 
-    x, y, width, height = bbox
+    x1, y1, x2, y2 = box
 
-    # --------------------------------------------------------
-    # Basic checks
-    # --------------------------------------------------------
-
-    if width <= 0 or height <= 0:
-
-        print(
-            f"\n[INVALID BBOX] {image_name}"
-            f"\n  bbox = {bbox}"
-            f"\n  Reason: width/height <= 0"
-        )
-
+    if x2 <= x1:
         return False
 
-    if x < 0 or y < 0:
-
-        print(
-            f"\n[INVALID BBOX] {image_name}"
-            f"\n  bbox = {bbox}"
-            f"\n  Reason: negative x/y"
-        )
-
+    if y2 <= y1:
         return False
 
-    # --------------------------------------------------------
-    # Boundary checks
-    # --------------------------------------------------------
-
-    right = x + width
-    bottom = y + height
-
-    if right > image_width:
-
-        print(
-            f"\n[INVALID BBOX] {image_name}"
-            f"\n  bbox = {bbox}"
-            f"\n  Image width = {image_width}"
-            f"\n  x + width = {right}"
-            f"\n  Reason: box extends beyond right edge"
-        )
-
+    if x1 < 0:
         return False
 
-    if bottom > image_height:
+    if y1 < 0:
+        return False
 
-        print(
-            f"\n[INVALID BBOX] {image_name}"
-            f"\n  bbox = {bbox}"
-            f"\n  Image height = {image_height}"
-            f"\n  y + height = {bottom}"
-            f"\n  Reason: box extends beyond bottom edge"
-        )
+    if x2 > width:
+        return False
 
+    if y2 > height:
         return False
 
     return True
 
 
-# ------------------------------------------------------------
+# ============================================================
+# BOX QUALITY
+# ============================================================
 
-def make_unique_filename(item):
+def box_quality(
+    box,
+    width,
+    height,
+):
     """
-    Avoid filename collisions.
+    Returns a score describing how plausible a box is.
 
-    Example:
-
-        basketball/img001.jpg
-        rugby/img001.jpg
-
-    become different filenames.
+    This is NOT used to invent annotations.
+    It is only used when several rotations are possible.
     """
 
-    case_name = item["case"]
+    if not validate_box(
+        box,
+        width,
+        height,
+    ):
+
+        return -1
+
+    x1, y1, x2, y2 = box
+
+    box_width = x2 - x1
+    box_height = y2 - y1
+
+    area = (
+        box_width *
+        box_height
+    )
+
+    image_area = (
+        width *
+        height
+    )
+
+    area_ratio = (
+        area /
+        image_area
+    )
+
+    score = 100
+
+    # Penalize boxes covering nearly the whole image
+    if area_ratio > 0.5:
+        score -= 50
+
+    elif area_ratio > 0.25:
+        score -= 25
+
+    elif area_ratio > 0.10:
+        score -= 10
+
+    # Ball boxes generally shouldn't be extremely thin
+    ratio = (
+        max(box_width, box_height) /
+        min(box_width, box_height)
+    )
+
+    if ratio > 10:
+        score -= 20
+
+    return score
+
+
+# ============================================================
+# FIND BEST ROTATION
+# ============================================================
+
+def determine_rotation(
+    source_box,
+    image_width,
+    image_height,
+):
+    """
+    Test 0/90/180/270.
+
+    IMPORTANT:
+    If more than one rotation is valid, we mark the result
+    as AMBIGUOUS instead of silently guessing.
+    """
+
+    candidates = []
+
+    for rotation in [
+        0,
+        90,
+        180,
+        270,
+    ]:
+
+        transformed = rotate_box(
+            source_box,
+            image_width,
+            image_height,
+            rotation,
+        )
+
+        transformed = normalize_xyxy(
+            transformed
+        )
+
+        if validate_box(
+            transformed,
+            image_width,
+            image_height,
+        ):
+
+            score = box_quality(
+                transformed,
+                image_width,
+                image_height,
+            )
+
+            candidates.append(
+                (
+                    rotation,
+                    transformed,
+                    score,
+                )
+            )
+
+    if len(candidates) == 0:
+
+        return None, "INVALID", []
+
+    if len(candidates) == 1:
+
+        rotation, box, score = (
+            candidates[0]
+        )
+
+        return (
+            rotation,
+            "UNIQUE",
+            candidates,
+        )
+
+    # Multiple valid rotations
+    #
+    # DO NOT blindly choose one.
+    #
+
+    candidates.sort(
+        key=lambda x: x[2],
+        reverse=True
+    )
+
+    best = candidates[0]
+
+    second = candidates[1]
+
+    if best[2] > second[2]:
+
+        # Still flag because this is heuristic
+        return (
+            best[0],
+            "HEURISTIC",
+            candidates,
+        )
+
+    return (
+        None,
+        "AMBIGUOUS",
+        candidates,
+    )
+
+
+# ============================================================
+# COCO CONVERSION
+# ============================================================
+
+def xyxy_to_coco(box):
+
+    x1, y1, x2, y2 = box
+
+    width = x2 - x1
+    height = y2 - y1
+
+    return [
+        float(x1),
+        float(y1),
+        float(width),
+        float(height),
+    ]
+
+
+# ============================================================
+# PROCESS ONE IMAGE
+# ============================================================
+
+def process_image(
+    item,
+    diagnostic_rows,
+):
+    """
+    Process one image + JSON.
+
+    Returns:
+
+        image_width
+        image_height
+        valid_boxes
+    """
 
     image_path = item["image"]
 
-    # Get sport/category folder
+    json_path = item["json"]
+
+    annotation = load_json(
+        json_path
+    )
+
+    actual_width, actual_height = (
+        get_actual_dimensions(
+            image_path
+        )
+    )
+
+    json_dimensions = annotation.get(
+        "dimensions"
+    )
+
+    # --------------------------------------------------------
+    # Record JSON dimensions
+    # --------------------------------------------------------
+
+    if (
+        isinstance(json_dimensions, list)
+        and len(json_dimensions) == 2
+    ):
+
+        json_width = json_dimensions[0]
+        json_height = json_dimensions[1]
+
+    else:
+
+        json_width = None
+        json_height = None
+
+    # --------------------------------------------------------
+    # Dimension mismatch
+    # --------------------------------------------------------
+
+    dimension_match = (
+        json_width == actual_width
+        and
+        json_height == actual_height
+    )
+
+    # --------------------------------------------------------
+    # Balls
+    # --------------------------------------------------------
+
+    data = annotation.get(
+        "data",
+        {}
+    )
+
+    balls = data.get(
+        "ball",
+        []
+    )
+
+    valid_boxes = []
+
+    for ball_index, ball in enumerate(
+        balls
+    ):
+
+        try:
+
+            source_box = (
+                ball[
+                    "entire"
+                ][
+                    "rect"
+                ]
+            )
+
+        except (
+            KeyError,
+            TypeError,
+        ):
+
+            diagnostic_rows.append(
+                {
+                    "image": str(image_path),
+                    "json": str(json_path),
+                    "ball_index": ball_index,
+                    "source_rect": "",
+                    "actual_width": actual_width,
+                    "actual_height": actual_height,
+                    "json_width": json_width,
+                    "json_height": json_height,
+                    "dimension_match": dimension_match,
+                    "rotation": "",
+                    "status": "MISSING_RECT",
+                    "coco_bbox": "",
+                }
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Check source rect
+        # ----------------------------------------------------
+
+        if (
+            not isinstance(source_box, list)
+            or len(source_box) != 4
+        ):
+
+            diagnostic_rows.append(
+                {
+                    "image": str(image_path),
+                    "json": str(json_path),
+                    "ball_index": ball_index,
+                    "source_rect": str(source_box),
+                    "actual_width": actual_width,
+                    "actual_height": actual_height,
+                    "json_width": json_width,
+                    "json_height": json_height,
+                    "dimension_match": dimension_match,
+                    "rotation": "",
+                    "status": "BAD_RECT",
+                    "coco_bbox": "",
+                }
+            )
+
+            continue
+
+        source_box = [
+            float(v)
+            for v in source_box
+        ]
+
+        # ----------------------------------------------------
+        # Forced rotation
+        # ----------------------------------------------------
+
+        if ROTATION != "auto":
+
+            rotation = int(
+                ROTATION
+            )
+
+            box = rotate_box(
+                source_box,
+                actual_width,
+                actual_height,
+                rotation,
+            )
+
+            box = normalize_xyxy(
+                box
+            )
+
+            status = (
+                "VALID"
+                if validate_box(
+                    box,
+                    actual_width,
+                    actual_height,
+                )
+                else "INVALID"
+            )
+
+        # ----------------------------------------------------
+        # Automatic rotation diagnosis
+        # ----------------------------------------------------
+
+        else:
+
+            rotation, status, candidates = (
+                determine_rotation(
+                    source_box,
+                    actual_width,
+                    actual_height,
+                )
+            )
+
+            if rotation is None:
+
+                box = None
+
+            else:
+
+                box = rotate_box(
+                    source_box,
+                    actual_width,
+                    actual_height,
+                    rotation,
+                )
+
+                box = normalize_xyxy(
+                    box
+                )
+
+        # ----------------------------------------------------
+        # Convert valid box
+        # ----------------------------------------------------
+
+        coco_bbox = ""
+
+        if box is not None and validate_box(
+            box,
+            actual_width,
+            actual_height,
+        ):
+
+            coco_bbox = xyxy_to_coco(
+                box
+            )
+
+            valid_boxes.append(
+                coco_bbox
+            )
+
+        # ----------------------------------------------------
+        # Diagnostic
+        # ----------------------------------------------------
+
+        diagnostic_rows.append(
+            {
+                "image": str(image_path),
+                "json": str(json_path),
+                "ball_index": ball_index,
+                "source_rect": str(source_box),
+                "actual_width": actual_width,
+                "actual_height": actual_height,
+                "json_width": json_width,
+                "json_height": json_height,
+                "dimension_match": dimension_match,
+                "rotation": (
+                    rotation
+                    if rotation is not None
+                    else ""
+                ),
+                "status": status,
+                "coco_bbox": str(coco_bbox),
+            }
+        )
+
+    return (
+        actual_width,
+        actual_height,
+        valid_boxes,
+    )
+
+
+# ============================================================
+# UNIQUE OUTPUT FILENAME
+# ============================================================
+
+def unique_filename(item):
+
+    image_path = item["image"]
+
+    case_name = item["case"]
+
+    # Example:
     #
+    # basic_train_caseA/
+    # basketball/
     # imgs/
-    #   parent = basketball
     #
-    category_name = image_path.parent.parent.name
+    # category = basketball
 
-    filename = image_path.name
+    category = (
+        image_path.parent.parent.name
+    )
 
-    unique_name = (
+    return (
         f"{case_name}_"
-        f"{category_name}_"
-        f"{filename}"
+        f"{category}_"
+        f"{image_path.name}"
     )
-
-    # Make filename safe
-    unique_name = unique_name.replace(
-        " ",
-        "_"
-    )
-
-    unique_name = unique_name.replace(
-        "/",
-        "_"
-    )
-
-    unique_name = unique_name.replace(
-        "\\",
-        "_"
-    )
-
-    return unique_name
 
 
 # ============================================================
-# BUILD ONE COCO SPLIT
+# CREATE COCO SPLIT
 # ============================================================
 
-def create_coco_split(
+def create_split(
     items,
     split_name,
-    output_root,
+    diagnostic_rows,
 ):
-    """
-    Create:
 
-        images/train/
-        images/val/
-        images/test/
-
-    and corresponding COCO JSON.
-    """
-
-    image_output_dir = (
-        output_root /
+    image_dir = (
+        OUTPUT_ROOT /
         "images" /
         split_name
     )
 
-    annotation_output_dir = (
-        output_root /
-        "annotations"
-    )
-
-    image_output_dir.mkdir(
+    image_dir.mkdir(
         parents=True,
         exist_ok=True
     )
-
-    annotation_output_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # COCO structure
-    # --------------------------------------------------------
 
     coco = {
 
         "info": {
-            "description": "Ball Detection Dataset",
+            "description": (
+                "Ball Detection Dataset"
+            ),
             "version": "1.0",
         },
 
@@ -543,287 +916,139 @@ def create_coco_split(
         "categories": CATEGORIES,
     }
 
+    image_id = 1
+
     annotation_id = 1
 
-    valid_images = 0
+    copied_names = set()
 
-    invalid_boxes = 0
+    skipped_images = 0
 
-    copied_images = set()
-
-    # --------------------------------------------------------
-    # Process images
-    # --------------------------------------------------------
-
-    for image_id, item in enumerate(
-        items,
-        start=1
-    ):
+    for item in items:
 
         image_path = item["image"]
 
-        label_path = item["label"]
-
-        annotation = load_json(
-            label_path
-        )
-
-        if annotation is None:
-            continue
-
-        # ----------------------------------------------------
-        # JSON dimensions
-        # ----------------------------------------------------
-
-        json_width, json_height = (
-            get_annotation_dimensions(
-                annotation
-            )
-        )
-
-        if (
-            json_width is None
-            or json_height is None
-        ):
-
-            print(
-                f"\n[WARNING] Invalid dimensions:"
-                f"\n          {label_path}"
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # Actual image dimensions
-        # ----------------------------------------------------
-
-        actual_width, actual_height = (
-            get_image_dimensions(
-                image_path
-            )
-        )
-
-        if (
-            actual_width is None
-            or actual_height is None
-        ):
-
-            continue
-
-        # ----------------------------------------------------
-        # Compare JSON and actual image dimensions
-        # ----------------------------------------------------
-
-        if (
-            json_width != actual_width
-            or json_height != actual_height
-        ):
-
-            print(
-                "\n[DIMENSION MISMATCH]"
-            )
-
-            print(
-                f"  Image : {image_path}"
-            )
-
-            print(
-                f"  JSON  : "
-                f"{json_width} x {json_height}"
-            )
-
-            print(
-                f"  Actual: "
-                f"{actual_width} x {actual_height}"
-            )
-
-            print(
-                "  NOTE: Annotation coordinates "
-                "will NOT be rotated automatically."
-            )
-
-        # ----------------------------------------------------
-        # Use actual image dimensions for COCO
-        # ----------------------------------------------------
-
-        image_width = actual_width
-        image_height = actual_height
-
-        # ----------------------------------------------------
-        # Unique filename
-        # ----------------------------------------------------
-
-        unique_name = make_unique_filename(
-            item
-        )
-
-        destination = (
-            image_output_dir /
-            unique_name
-        )
-
-        # Prevent accidental duplicate filename
-        if unique_name in copied_images:
-
-            print(
-                f"\n[ERROR] Duplicate output filename:"
-                f"\n        {unique_name}"
-            )
-
-            continue
-
-        copied_images.add(
-            unique_name
-        )
-
-        # ----------------------------------------------------
-        # Copy image
-        # ----------------------------------------------------
-
         try:
 
-            shutil.copy2(
-                image_path,
-                destination
+            width, height, boxes = (
+                process_image(
+                    item,
+                    diagnostic_rows,
+                )
             )
 
         except Exception as e:
 
             print(
-                f"\n[ERROR] Could not copy:"
-                f"\n        {image_path}"
-                f"\n        {e}"
+                f"\n[ERROR]"
+                f"\n{image_path}"
+                f"\n{e}"
             )
+
+            skipped_images += 1
 
             continue
 
         # ----------------------------------------------------
-        # COCO image entry
+        # If no valid boxes, skip image
+        # ----------------------------------------------------
+
+        if len(boxes) == 0:
+
+            skipped_images += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Filename
+        # ----------------------------------------------------
+
+        filename = unique_filename(
+            item
+        )
+
+        if filename in copied_names:
+
+            print(
+                f"\n[ERROR] Duplicate filename:"
+                f"\n{filename}"
+            )
+
+            skipped_images += 1
+
+            continue
+
+        copied_names.add(
+            filename
+        )
+
+        destination = (
+            image_dir /
+            filename
+        )
+
+        shutil.copy2(
+            image_path,
+            destination
+        )
+
+        # ----------------------------------------------------
+        # COCO image
         # ----------------------------------------------------
 
         coco["images"].append(
             {
                 "id": image_id,
-                "file_name": unique_name,
-                "width": image_width,
-                "height": image_height,
+                "file_name": filename,
+                "width": width,
+                "height": height,
             }
         )
 
-        valid_images += 1
-
         # ----------------------------------------------------
-        # Get ball annotations
+        # COCO annotations
         # ----------------------------------------------------
 
-        data = annotation.get(
-            "data",
-            {}
-        )
+        for bbox in boxes:
 
-        balls = data.get(
-            "ball",
-            []
-        )
-
-        if not isinstance(
-            balls,
-            list
-        ):
-
-            continue
-
-        # ----------------------------------------------------
-        # Process each ball
-        # ----------------------------------------------------
-
-        for ball in balls:
-
-            if not isinstance(
-                ball,
-                dict
-            ):
-                continue
-
-            entire = ball.get(
-                "entire",
-                {}
-            )
-
-            if not isinstance(
-                entire,
-                dict
-            ):
-                continue
-
-            rect = entire.get(
-                "rect"
-            )
-
-            if rect is None:
-                continue
-
-            # ------------------------------------------------
-            # Convert
-            # ------------------------------------------------
-
-            bbox = convert_bbox_to_coco(
-                rect
-            )
-
-            # ------------------------------------------------
-            # Validate
-            # ------------------------------------------------
-
-            if not validate_bbox(
-                bbox,
-                image_width,
-                image_height,
-                image_path.name,
-            ):
-
-                invalid_boxes += 1
-
-                continue
-
-            x, y, width, height = bbox
-
-            # ------------------------------------------------
-            # COCO annotation
-            # ------------------------------------------------
+            x, y, w, h = bbox
 
             coco["annotations"].append(
                 {
                     "id": annotation_id,
-
                     "image_id": image_id,
-
                     "category_id": 1,
-
                     "bbox": [
                         x,
                         y,
-                        width,
-                        height,
+                        w,
+                        h,
                     ],
-
-                    "area": (
-                        width *
-                        height
-                    ),
-
+                    "area": w * h,
                     "iscrowd": 0,
                 }
             )
 
             annotation_id += 1
 
+        image_id += 1
+
     # --------------------------------------------------------
-    # Save COCO JSON
+    # Save JSON
     # --------------------------------------------------------
 
+    annotation_dir = (
+        OUTPUT_ROOT /
+        "annotations"
+    )
+
+    annotation_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
     json_path = (
-        annotation_output_dir /
+        annotation_dir /
         f"instances_{split_name}.json"
     )
 
@@ -839,43 +1064,79 @@ def create_coco_split(
             indent=2
         )
 
-    # --------------------------------------------------------
-    # Print statistics
-    # --------------------------------------------------------
-
     print(
-        "\n" + "-" * 70
+        f"\nCreated {split_name}:"
     )
 
     print(
-        f"CREATED: {split_name.upper()}"
-    )
-
-    print(
-        "-" * 70
-    )
-
-    print(
-        f"Images      : "
+        f"  Images      : "
         f"{len(coco['images'])}"
     )
 
     print(
-        f"Annotations : "
+        f"  Annotations : "
         f"{len(coco['annotations'])}"
     )
 
     print(
-        f"Invalid boxes skipped: "
-        f"{invalid_boxes}"
+        f"  Skipped     : "
+        f"{skipped_images}"
     )
 
     print(
-        f"JSON:"
-        f"\n  {json_path}"
+        f"  JSON        : "
+        f"{json_path}"
     )
 
     return coco
+
+
+# ============================================================
+# SAVE DIAGNOSTICS
+# ============================================================
+
+def save_diagnostics(rows):
+
+    path = (
+        OUTPUT_ROOT /
+        "bbox_diagnostics.csv"
+    )
+
+    fields = [
+        "image",
+        "json",
+        "ball_index",
+        "source_rect",
+        "actual_width",
+        "actual_height",
+        "json_width",
+        "json_height",
+        "dimension_match",
+        "rotation",
+        "status",
+        "coco_bbox",
+    ]
+
+    with open(
+        path,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=fields
+        )
+
+        writer.writeheader()
+
+        writer.writerows(rows)
+
+    print(
+        f"\nDiagnostics saved:"
+        f"\n  {path}"
+    )
 
 
 # ============================================================
@@ -890,7 +1151,7 @@ def main():
     )
 
     print(
-        "COCO BALL DATASET CREATOR"
+        "ROBUST COCO DATASET CONVERTER"
     )
 
     print(
@@ -898,21 +1159,17 @@ def main():
     )
 
     print(
-        f"\nSOURCE:"
+        f"\nSource:"
         f"\n  {SOURCE_ROOT}"
     )
 
     print(
-        f"\nOUTPUT:"
+        f"\nOutput:"
         f"\n  {OUTPUT_ROOT}"
     )
 
-    # --------------------------------------------------------
-    # Print selected folders
-    # --------------------------------------------------------
-
     print(
-        "\nINCLUDED CASES:"
+        "\nIncluded:"
     )
 
     for case in SELECTED_CASES:
@@ -922,7 +1179,7 @@ def main():
         )
 
     print(
-        "\nEXCLUDED FOLDERS:"
+        "\nExcluded:"
     )
 
     for folder in sorted(
@@ -933,84 +1190,61 @@ def main():
             f"  - {folder}"
         )
 
+    print(
+        "\nSource rect interpretation:"
+    )
+
+    print(
+        "  [x1, y1, x2, y2]"
+    )
+
+    print(
+        "\nCOCO output:"
+    )
+
+    print(
+        "  [x, y, width, height]"
+    )
+
+    print(
+        "\nRotation mode:"
+    )
+
+    print(
+        f"  {ROTATION}"
+    )
+
     # --------------------------------------------------------
-    # Check source
+    # Validate split
     # --------------------------------------------------------
 
-    if not SOURCE_ROOT.exists():
+    total_ratio = (
+        TRAIN_RATIO +
+        VAL_RATIO +
+        TEST_RATIO
+    )
 
-        print(
-            "\n[ERROR] SOURCE_ROOT does not exist:"
+    if abs(
+        total_ratio - 1.0
+    ) > 0.0001:
+
+        raise ValueError(
+            "Split ratios must sum to 1.0"
         )
 
-        print(
-            SOURCE_ROOT
-        )
-
-        return
-
     # --------------------------------------------------------
-    # Find image/label pairs
+    # Find pairs
     # --------------------------------------------------------
 
-    pairs, missing_labels = (
-        find_image_label_pairs()
-    )
+    pairs = find_pairs()
 
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
-
-    print(
-        "\n" +
-        "=" * 70
-    )
-
-    print(
-        "DATASET DISCOVERY SUMMARY"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"Image-label pairs : "
-        f"{len(pairs)}"
-    )
-
-    print(
-        f"Missing labels    : "
-        f"{len(missing_labels)}"
-    )
-
-    if len(pairs) == 0:
+    if not pairs:
 
         print(
-            "\n[ERROR] No image-label pairs found."
+            "\nNo images found."
         )
 
         return
-
-    # --------------------------------------------------------
-    # Count by case
-    # --------------------------------------------------------
-
-    case_counts = Counter(
-        item["case"]
-        for item in pairs
-    )
-
-    print(
-        "\nImages by case:"
-    )
-
-    for case_name in SELECTED_CASES:
-
-        print(
-            f"  {case_name}: "
-            f"{case_counts.get(case_name, 0)}"
-        )
 
     # --------------------------------------------------------
     # Shuffle
@@ -1040,15 +1274,6 @@ def main():
         VAL_RATIO
     )
 
-    # Everything remaining goes to test.
-    # This guarantees exactly 100%.
-
-    test_count = (
-        total -
-        train_count -
-        val_count
-    )
-
     train_items = pairs[
         :train_count
     ]
@@ -1062,17 +1287,13 @@ def main():
         train_count + val_count:
     ]
 
-    # --------------------------------------------------------
-    # Print split
-    # --------------------------------------------------------
-
     print(
         "\n" +
         "=" * 70
     )
 
     print(
-        "DATASET SPLIT"
+        "SPLIT"
     )
 
     print(
@@ -1085,60 +1306,46 @@ def main():
 
     print(
         f"Train : {len(train_items)} "
-        f"({len(train_items) / total * 100:.2f}%)"
+        f"({len(train_items)/total*100:.2f}%)"
     )
 
     print(
         f"Val   : {len(val_items)} "
-        f"({len(val_items) / total * 100:.2f}%)"
+        f"({len(val_items)/total*100:.2f}%)"
     )
 
     print(
         f"Test  : {len(test_items)} "
-        f"({len(test_items) / total * 100:.2f}%)"
+        f"({len(test_items)/total*100:.2f}%)"
     )
 
     # --------------------------------------------------------
-    # Create output directory
+    # Remove old output
     # --------------------------------------------------------
 
     if OUTPUT_ROOT.exists():
 
         print(
-            "\n[WARNING]"
-        )
-
-        print(
-            "Output directory already exists:"
-        )
-
-        print(
-            OUTPUT_ROOT
+            f"\nOutput already exists:"
+            f"\n{OUTPUT_ROOT}"
         )
 
         answer = input(
-            "\nDelete and recreate it? "
+            "\nDelete it and recreate? "
             "[y/N]: "
         ).strip().lower()
 
-        if answer == "y":
-
-            shutil.rmtree(
-                OUTPUT_ROOT
-            )
-
-        else:
+        if answer != "y":
 
             print(
                 "\nStopped."
             )
 
-            print(
-                "Choose another OUTPUT_ROOT "
-                "or delete the existing directory."
-            )
-
             return
+
+        shutil.rmtree(
+            OUTPUT_ROOT
+        )
 
     OUTPUT_ROOT.mkdir(
         parents=True,
@@ -1146,34 +1353,70 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Create TRAIN
+    # Diagnostics
     # --------------------------------------------------------
 
-    create_coco_split(
+    diagnostic_rows = []
+
+    # --------------------------------------------------------
+    # Create splits
+    # --------------------------------------------------------
+
+    create_split(
         train_items,
         "train",
-        OUTPUT_ROOT
+        diagnostic_rows,
     )
 
-    # --------------------------------------------------------
-    # Create VAL
-    # --------------------------------------------------------
-
-    create_coco_split(
+    create_split(
         val_items,
         "val",
-        OUTPUT_ROOT
+        diagnostic_rows,
     )
 
-    # --------------------------------------------------------
-    # Create TEST
-    # --------------------------------------------------------
-
-    create_coco_split(
+    create_split(
         test_items,
         "test",
-        OUTPUT_ROOT
+        diagnostic_rows,
     )
+
+    # --------------------------------------------------------
+    # Diagnostics CSV
+    # --------------------------------------------------------
+
+    save_diagnostics(
+        diagnostic_rows
+    )
+
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
+
+    status_counts = Counter(
+        row["status"]
+        for row in diagnostic_rows
+    )
+
+    print(
+        "\n" +
+        "=" * 70
+    )
+
+    print(
+        "ANNOTATION DIAGNOSTICS"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    for status, count in (
+        status_counts.items()
+    ):
+
+        print(
+            f"{status:15s}: {count}"
+        )
 
     # --------------------------------------------------------
     # Final structure
@@ -1194,8 +1437,6 @@ def main():
 
     print(
         f"""
-COCO DATASET:
-
 {OUTPUT_ROOT}/
 │
 ├── images/
@@ -1203,64 +1444,13 @@ COCO DATASET:
 │   ├── val/
 │   └── test/
 │
-└── annotations/
-    ├── instances_train.json
-    ├── instances_val.json
-    └── instances_test.json
+├── annotations/
+│   ├── instances_train.json
+│   ├── instances_val.json
+│   └── instances_test.json
+│
+└── bbox_diagnostics.csv
 """
-    )
-
-    # --------------------------------------------------------
-    # Final counts
-    # --------------------------------------------------------
-
-    print(
-        "FINAL SPLIT:"
-    )
-
-    print(
-        f"  Train: {len(train_items)}"
-    )
-
-    print(
-        f"  Val  : {len(val_items)}"
-    )
-
-    print(
-        f"  Test : {len(test_items)}"
-    )
-
-    print(
-        f"  Total: {total}"
-    )
-
-    print(
-        "\nRandom seed:"
-        f" {RANDOM_SEED}"
-    )
-
-    print(
-        "\nBBOX FORMAT USED:"
-    )
-
-    print(
-        "  rect = [x, y, width, height]"
-    )
-
-    print(
-        "  COCO = [x, y, width, height]"
-    )
-
-    print(
-        "\nDIMENSIONS FORMAT USED:"
-    )
-
-    print(
-        "  dimensions = [width, height]"
-    )
-
-    print(
-        "\nNo automatic 90-degree rotation was applied."
     )
 
 
