@@ -5,11 +5,11 @@ import csv
 from pathlib import Path
 from collections import Counter
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 SOURCE_ROOT = Path("/home/eng_megha/balldataset")
@@ -17,7 +17,7 @@ SOURCE_ROOT = Path("/home/eng_megha/balldataset")
 OUTPUT_ROOT = Path("/home/eng_megha/balldataset_coco")
 
 
-# Only these folders
+# ONLY these four
 SELECTED_CASES = [
     "AI_train_caseB",
     "basic_train_caseA",
@@ -26,7 +26,7 @@ SELECTED_CASES = [
 ]
 
 
-# Explicitly ignored folders
+# Explicitly ignored
 EXCLUDED_FOLDERS = {
     "aug",
     "other",
@@ -34,56 +34,48 @@ EXCLUDED_FOLDERS = {
 }
 
 
-# Split
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.20
 TEST_RATIO = 0.10
 
-
-# Reproducibility
 RANDOM_SEED = 42
 
 
 # ============================================================
-# IMPORTANT ANNOTATION SETTINGS
+# SOURCE RECT FORMAT
 # ============================================================
-
-# Your source annotation is assumed to be:
 #
-#     [x1, y1, x2, y2]
-#
-# NOT COCO format.
-#
-SOURCE_RECT_FORMAT = "xyxy"
-
-
-# ------------------------------------------------------------
-# Rotation handling
-# ------------------------------------------------------------
-#
-# "auto" tries to determine whether the annotation appears
-# to correspond to a rotated coordinate system.
-#
-# You can later force:
-#
-#     0
-#     90
-#     180
-#     270
-#
-# if we determine the dataset's exact convention.
-#
-ROTATION = "auto"
-
-
-# ------------------------------------------------------------
 # IMPORTANT:
 #
-# Do not automatically accept a rotation just because it
-# produces numbers inside the image.
+# We are treating your source annotation as:
 #
-# Auto mode will flag ambiguous cases for inspection.
-# ------------------------------------------------------------
+#       [x1, y1, x2, y2]
+#
+# NOT:
+#
+#       [x, y, width, height]
+#
+# ============================================================
+
+
+SOURCE_FORMAT = "xyxy"
+
+
+# ============================================================
+# IMAGE ORIENTATION
+# ============================================================
+#
+# "exif" means:
+#
+#   - read the image EXIF orientation
+#   - physically correct the orientation
+#   - transform the bounding box accordingly
+#
+# This is much safer than guessing 90/180/270 from a bbox.
+#
+# ============================================================
+
+USE_EXIF_ORIENTATION = True
 
 
 IMAGE_EXTENSIONS = {
@@ -109,13 +101,10 @@ CATEGORIES = [
 
 
 # ============================================================
-# PATH HELPERS
+# EXCLUDED PATH
 # ============================================================
 
 def is_excluded(path):
-    """
-    Check whether any component of a path is excluded.
-    """
 
     for part in path.parts:
 
@@ -126,18 +115,12 @@ def is_excluded(path):
 
 
 # ============================================================
-# FIND IMAGE + JSON PAIRS
+# FIND IMAGE / JSON PAIRS
 # ============================================================
 
 def find_pairs():
 
     pairs = []
-
-    missing_labels = []
-
-    print("\n" + "=" * 70)
-    print("SEARCHING DATASET")
-    print("=" * 70)
 
     for case_name in SELECTED_CASES:
 
@@ -146,24 +129,23 @@ def find_pairs():
         if not case_root.exists():
 
             print(
-                f"\n[WARNING] Missing case:"
-                f"\n{case_root}"
+                f"[WARNING] Missing:"
+                f" {case_root}"
             )
 
             continue
 
         print(
-            f"\nScanning: {case_name}"
+            f"Scanning: {case_name}"
         )
 
-        imgs_dirs = [
-            p
-            for p in case_root.rglob("imgs")
-            if p.is_dir()
-            and not is_excluded(p)
-        ]
+        for imgs_dir in case_root.rglob("imgs"):
 
-        for imgs_dir in sorted(imgs_dirs):
+            if not imgs_dir.is_dir():
+                continue
+
+            if is_excluded(imgs_dir):
+                continue
 
             labels_dir = (
                 imgs_dir.parent /
@@ -173,15 +155,13 @@ def find_pairs():
             if not labels_dir.exists():
 
                 print(
-                    f"\n[WARNING] Missing labels:"
-                    f"\n{labels_dir}"
+                    f"[WARNING] No labels:"
+                    f" {labels_dir}"
                 )
 
                 continue
 
-            for image_path in sorted(
-                imgs_dir.iterdir()
-            ):
+            for image_path in imgs_dir.iterdir():
 
                 if not image_path.is_file():
                     continue
@@ -199,8 +179,9 @@ def find_pairs():
 
                 if not json_path.exists():
 
-                    missing_labels.append(
-                        str(image_path)
+                    print(
+                        f"[WARNING] Missing JSON:"
+                        f" {image_path}"
                     )
 
                     continue
@@ -212,16 +193,6 @@ def find_pairs():
                         "case": case_name,
                     }
                 )
-
-    print(
-        f"\nImage/JSON pairs found: "
-        f"{len(pairs)}"
-    )
-
-    print(
-        f"Missing JSON files: "
-        f"{len(missing_labels)}"
-    )
 
     return pairs
 
@@ -242,44 +213,72 @@ def load_json(path):
 
 
 # ============================================================
-# IMAGE DIMENSIONS
+# GET IMAGE ORIENTATION
 # ============================================================
 
-def get_actual_dimensions(image_path):
+def get_exif_orientation(image):
 
-    with Image.open(image_path) as img:
+    try:
 
-        return img.size
+        exif = image.getexif()
+
+        # EXIF orientation tag = 274
+
+        return exif.get(
+            274,
+            1
+        )
+
+    except Exception:
+
+        return 1
 
 
 # ============================================================
-# ROTATION FUNCTIONS
+# CORRECT IMAGE ORIENTATION
 # ============================================================
 
-def rotate_box(
-    box,
+def correct_image_orientation(image):
+
+    """
+    PIL's ImageOps.exif_transpose physically rotates/flips
+    the image according to EXIF orientation.
+
+    The returned image is therefore in normal visual
+    orientation.
+    """
+
+    if not USE_EXIF_ORIENTATION:
+
+        return image
+
+    return ImageOps.exif_transpose(
+        image
+    )
+
+
+# ============================================================
+# TRANSFORM XYXY ACCORDING TO EXIF
+# ============================================================
+
+def transform_bbox_exif(
+    bbox,
     width,
     height,
-    rotation,
+    orientation,
 ):
     """
-    Convert an XYXY box from a rotated coordinate system
-    back into the original image coordinate system.
+    Transform a bbox according to EXIF orientation.
 
-    Input:
-        box = [x1, y1, x2, y2]
+    Input bbox:
+        [x1, y1, x2, y2]
 
-    rotation:
-        0
-        90
-        180
-        270
+    Coordinates are assumed to belong to the raw image.
 
-    The formulas operate on all four corners, which is safer
-    than trying to transform only x1/y1/x2/y2.
+    Output bbox belongs to the EXIF-corrected image.
     """
 
-    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = bbox
 
     corners = [
         (x1, y1),
@@ -292,33 +291,90 @@ def rotate_box(
 
     for x, y in corners:
 
-        if rotation == 0:
+        # ----------------------------------------------------
+        # EXIF 1
+        # Normal
+        # ----------------------------------------------------
+
+        if orientation == 1:
 
             nx = x
             ny = y
 
-        elif rotation == 90:
+        # ----------------------------------------------------
+        # EXIF 2
+        # Mirror horizontal
+        # ----------------------------------------------------
 
-            # 90 degrees clockwise
-            nx = height - y
-            ny = x
+        elif orientation == 2:
 
-        elif rotation == 180:
+            nx = width - x
+            ny = y
+
+        # ----------------------------------------------------
+        # EXIF 3
+        # Rotate 180
+        # ----------------------------------------------------
+
+        elif orientation == 3:
 
             nx = width - x
             ny = height - y
 
-        elif rotation == 270:
+        # ----------------------------------------------------
+        # EXIF 4
+        # Mirror vertical
+        # ----------------------------------------------------
 
-            # 90 degrees counter-clockwise
+        elif orientation == 4:
+
+            nx = x
+            ny = height - y
+
+        # ----------------------------------------------------
+        # EXIF 5
+        # Mirror horizontal + rotate 270 CW
+        # ----------------------------------------------------
+
+        elif orientation == 5:
+
+            nx = y
+            ny = x
+
+        # ----------------------------------------------------
+        # EXIF 6
+        # Rotate 90 CW
+        # ----------------------------------------------------
+
+        elif orientation == 6:
+
+            nx = height - y
+            ny = x
+
+        # ----------------------------------------------------
+        # EXIF 7
+        # Mirror horizontal + rotate 90 CW
+        # ----------------------------------------------------
+
+        elif orientation == 7:
+
+            nx = height - y
+            ny = width - x
+
+        # ----------------------------------------------------
+        # EXIF 8
+        # Rotate 270 CW
+        # ----------------------------------------------------
+
+        elif orientation == 8:
+
             nx = y
             ny = width - x
 
         else:
 
-            raise ValueError(
-                f"Unsupported rotation: {rotation}"
-            )
+            nx = x
+            ny = y
 
         transformed.append(
             (nx, ny)
@@ -343,12 +399,12 @@ def rotate_box(
 
 
 # ============================================================
-# NORMALIZE XYXY
+# NORMALIZE BOX
 # ============================================================
 
-def normalize_xyxy(box):
+def normalize_xyxy(bbox):
 
-    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = bbox
 
     return [
         min(x1, x2),
@@ -359,219 +415,58 @@ def normalize_xyxy(box):
 
 
 # ============================================================
-# VALIDATE BOX
+# CLIP BOX TO IMAGE
 # ============================================================
 
-def validate_box(
-    box,
-    width,
-    height,
-):
-
-    if box is None:
-        return False
-
-    x1, y1, x2, y2 = box
-
-    if x2 <= x1:
-        return False
-
-    if y2 <= y1:
-        return False
-
-    if x1 < 0:
-        return False
-
-    if y1 < 0:
-        return False
-
-    if x2 > width:
-        return False
-
-    if y2 > height:
-        return False
-
-    return True
-
-
-# ============================================================
-# BOX QUALITY
-# ============================================================
-
-def box_quality(
-    box,
+def clip_bbox(
+    bbox,
     width,
     height,
 ):
     """
-    Returns a score describing how plausible a box is.
+    Keep a box inside image boundaries.
 
-    This is NOT used to invent annotations.
-    It is only used when several rotations are possible.
+    This is important because some annotations can touch
+    or slightly exceed image boundaries.
     """
 
-    if not validate_box(
-        box,
-        width,
-        height,
-    ):
+    x1, y1, x2, y2 = bbox
 
-        return -1
-
-    x1, y1, x2, y2 = box
-
-    box_width = x2 - x1
-    box_height = y2 - y1
-
-    area = (
-        box_width *
-        box_height
-    )
-
-    image_area = (
-        width *
-        height
-    )
-
-    area_ratio = (
-        area /
-        image_area
-    )
-
-    score = 100
-
-    # Penalize boxes covering nearly the whole image
-    if area_ratio > 0.5:
-        score -= 50
-
-    elif area_ratio > 0.25:
-        score -= 25
-
-    elif area_ratio > 0.10:
-        score -= 10
-
-    # Ball boxes generally shouldn't be extremely thin
-    ratio = (
-        max(box_width, box_height) /
-        min(box_width, box_height)
-    )
-
-    if ratio > 10:
-        score -= 20
-
-    return score
-
-
-# ============================================================
-# FIND BEST ROTATION
-# ============================================================
-
-def determine_rotation(
-    source_box,
-    image_width,
-    image_height,
-):
-    """
-    Test 0/90/180/270.
-
-    IMPORTANT:
-    If more than one rotation is valid, we mark the result
-    as AMBIGUOUS instead of silently guessing.
-    """
-
-    candidates = []
-
-    for rotation in [
+    x1 = max(
         0,
-        90,
-        180,
-        270,
-    ]:
-
-        transformed = rotate_box(
-            source_box,
-            image_width,
-            image_height,
-            rotation,
-        )
-
-        transformed = normalize_xyxy(
-            transformed
-        )
-
-        if validate_box(
-            transformed,
-            image_width,
-            image_height,
-        ):
-
-            score = box_quality(
-                transformed,
-                image_width,
-                image_height,
-            )
-
-            candidates.append(
-                (
-                    rotation,
-                    transformed,
-                    score,
-                )
-            )
-
-    if len(candidates) == 0:
-
-        return None, "INVALID", []
-
-    if len(candidates) == 1:
-
-        rotation, box, score = (
-            candidates[0]
-        )
-
-        return (
-            rotation,
-            "UNIQUE",
-            candidates,
-        )
-
-    # Multiple valid rotations
-    #
-    # DO NOT blindly choose one.
-    #
-
-    candidates.sort(
-        key=lambda x: x[2],
-        reverse=True
+        min(x1, width)
     )
 
-    best = candidates[0]
-
-    second = candidates[1]
-
-    if best[2] > second[2]:
-
-        # Still flag because this is heuristic
-        return (
-            best[0],
-            "HEURISTIC",
-            candidates,
-        )
-
-    return (
-        None,
-        "AMBIGUOUS",
-        candidates,
+    y1 = max(
+        0,
+        min(y1, height)
     )
+
+    x2 = max(
+        0,
+        min(x2, width)
+    )
+
+    y2 = max(
+        0,
+        min(y2, height)
+    )
+
+    return [
+        x1,
+        y1,
+        x2,
+        y2,
+    ]
 
 
 # ============================================================
-# COCO CONVERSION
+# XYXY -> COCO
 # ============================================================
 
-def xyxy_to_coco(box):
+def xyxy_to_coco(bbox):
 
-    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = bbox
 
     width = x2 - x1
     height = y2 - y1
@@ -590,78 +485,82 @@ def xyxy_to_coco(box):
 
 def process_image(
     item,
-    diagnostic_rows,
+    diagnostics,
 ):
-    """
-    Process one image + JSON.
-
-    Returns:
-
-        image_width
-        image_height
-        valid_boxes
-    """
 
     image_path = item["image"]
-
     json_path = item["json"]
 
     annotation = load_json(
         json_path
     )
 
-    actual_width, actual_height = (
-        get_actual_dimensions(
-            image_path
-        )
-    )
+    # --------------------------------------------------------
+    # Open original image
+    # --------------------------------------------------------
 
-    json_dimensions = annotation.get(
+    with Image.open(
+        image_path
+    ) as original:
+
+        raw_width, raw_height = (
+            original.size
+        )
+
+        orientation = (
+            get_exif_orientation(
+                original
+            )
+        )
+
+        # Correct visual orientation
+        corrected = (
+            correct_image_orientation(
+                original
+            )
+        )
+
+        corrected_width, corrected_height = (
+            corrected.size
+        )
+
+    # --------------------------------------------------------
+    # JSON dimensions
+    # --------------------------------------------------------
+
+    dimensions = annotation.get(
         "dimensions"
     )
 
-    # --------------------------------------------------------
-    # Record JSON dimensions
-    # --------------------------------------------------------
-
     if (
-        isinstance(json_dimensions, list)
-        and len(json_dimensions) == 2
+        isinstance(dimensions, list)
+        and len(dimensions) == 2
     ):
 
-        json_width = json_dimensions[0]
-        json_height = json_dimensions[1]
+        json_dim_1 = int(
+            dimensions[0]
+        )
+
+        json_dim_2 = int(
+            dimensions[1]
+        )
 
     else:
 
-        json_width = None
-        json_height = None
-
-    # --------------------------------------------------------
-    # Dimension mismatch
-    # --------------------------------------------------------
-
-    dimension_match = (
-        json_width == actual_width
-        and
-        json_height == actual_height
-    )
+        json_dim_1 = None
+        json_dim_2 = None
 
     # --------------------------------------------------------
     # Balls
     # --------------------------------------------------------
 
-    data = annotation.get(
-        "data",
-        {}
+    balls = (
+        annotation
+        .get("data", {})
+        .get("ball", [])
     )
 
-    balls = data.get(
-        "ball",
-        []
-    )
-
-    valid_boxes = []
+    coco_boxes = []
 
     for ball_index, ball in enumerate(
         balls
@@ -669,12 +568,10 @@ def process_image(
 
         try:
 
-            source_box = (
-                ball[
-                    "entire"
-                ][
-                    "rect"
-                ]
+            rect = (
+                ball
+                ["entire"]
+                ["rect"]
             )
 
         except (
@@ -682,192 +579,195 @@ def process_image(
             TypeError,
         ):
 
-            diagnostic_rows.append(
+            diagnostics.append(
                 {
                     "image": str(image_path),
                     "json": str(json_path),
                     "ball_index": ball_index,
-                    "source_rect": "",
-                    "actual_width": actual_width,
-                    "actual_height": actual_height,
-                    "json_width": json_width,
-                    "json_height": json_height,
-                    "dimension_match": dimension_match,
-                    "rotation": "",
-                    "status": "MISSING_RECT",
-                    "coco_bbox": "",
+                    "rect": "",
+                    "raw_size":
+                        f"{raw_width}x{raw_height}",
+                    "corrected_size":
+                        f"{corrected_width}x{corrected_height}",
+                    "exif_orientation":
+                        orientation,
+                    "status":
+                        "MISSING_RECT",
                 }
             )
 
             continue
-
-        # ----------------------------------------------------
-        # Check source rect
-        # ----------------------------------------------------
 
         if (
-            not isinstance(source_box, list)
-            or len(source_box) != 4
+            not isinstance(rect, list)
+            or len(rect) != 4
         ):
 
-            diagnostic_rows.append(
+            diagnostics.append(
                 {
                     "image": str(image_path),
                     "json": str(json_path),
                     "ball_index": ball_index,
-                    "source_rect": str(source_box),
-                    "actual_width": actual_width,
-                    "actual_height": actual_height,
-                    "json_width": json_width,
-                    "json_height": json_height,
-                    "dimension_match": dimension_match,
-                    "rotation": "",
-                    "status": "BAD_RECT",
-                    "coco_bbox": "",
+                    "rect": str(rect),
+                    "raw_size":
+                        f"{raw_width}x{raw_height}",
+                    "corrected_size":
+                        f"{corrected_width}x{corrected_height}",
+                    "exif_orientation":
+                        orientation,
+                    "status":
+                        "BAD_RECT",
                 }
             )
 
             continue
 
-        source_box = [
+        rect = [
             float(v)
-            for v in source_box
+            for v in rect
         ]
 
         # ----------------------------------------------------
-        # Forced rotation
+        # SOURCE XYXY
         # ----------------------------------------------------
 
-        if ROTATION != "auto":
-
-            rotation = int(
-                ROTATION
-            )
-
-            box = rotate_box(
-                source_box,
-                actual_width,
-                actual_height,
-                rotation,
-            )
-
-            box = normalize_xyxy(
-                box
-            )
-
-            status = (
-                "VALID"
-                if validate_box(
-                    box,
-                    actual_width,
-                    actual_height,
-                )
-                else "INVALID"
-            )
+        source_bbox = normalize_xyxy(
+            rect
+        )
 
         # ----------------------------------------------------
-        # Automatic rotation diagnosis
+        # Transform EXIF orientation
         # ----------------------------------------------------
+
+        if (
+            USE_EXIF_ORIENTATION
+            and orientation != 1
+        ):
+
+            bbox = transform_bbox_exif(
+                source_bbox,
+                raw_width,
+                raw_height,
+                orientation,
+            )
 
         else:
 
-            rotation, status, candidates = (
-                determine_rotation(
-                    source_box,
-                    actual_width,
-                    actual_height,
-                )
-            )
-
-            if rotation is None:
-
-                box = None
-
-            else:
-
-                box = rotate_box(
-                    source_box,
-                    actual_width,
-                    actual_height,
-                    rotation,
-                )
-
-                box = normalize_xyxy(
-                    box
-                )
+            bbox = source_bbox
 
         # ----------------------------------------------------
-        # Convert valid box
+        # Normalize again
         # ----------------------------------------------------
 
-        coco_bbox = ""
+        bbox = normalize_xyxy(
+            bbox
+        )
 
-        if box is not None and validate_box(
-            box,
-            actual_width,
-            actual_height,
+        # ----------------------------------------------------
+        # Clip
+        # ----------------------------------------------------
+
+        bbox = clip_bbox(
+            bbox,
+            corrected_width,
+            corrected_height,
+        )
+
+        # ----------------------------------------------------
+        # Check size
+        # ----------------------------------------------------
+
+        x1, y1, x2, y2 = bbox
+
+        box_width = (
+            x2 - x1
+        )
+
+        box_height = (
+            y2 - y1
+        )
+
+        # ----------------------------------------------------
+        # Reject only genuinely zero/negative boxes
+        # ----------------------------------------------------
+
+        if (
+            box_width <= 0
+            or
+            box_height <= 0
         ):
 
-            coco_bbox = xyxy_to_coco(
-                box
+            diagnostics.append(
+                {
+                    "image": str(image_path),
+                    "json": str(json_path),
+                    "ball_index": ball_index,
+                    "rect": str(rect),
+                    "raw_size":
+                        f"{raw_width}x{raw_height}",
+                    "corrected_size":
+                        f"{corrected_width}x{corrected_height}",
+                    "exif_orientation":
+                        orientation,
+                    "status":
+                        "INVALID_AFTER_TRANSFORM",
+                }
             )
 
-            valid_boxes.append(
-                coco_bbox
-            )
+            continue
 
         # ----------------------------------------------------
-        # Diagnostic
+        # Convert to COCO
         # ----------------------------------------------------
 
-        diagnostic_rows.append(
+        coco_bbox = xyxy_to_coco(
+            bbox
+        )
+
+        coco_boxes.append(
+            coco_bbox
+        )
+
+        diagnostics.append(
             {
                 "image": str(image_path),
                 "json": str(json_path),
                 "ball_index": ball_index,
-                "source_rect": str(source_box),
-                "actual_width": actual_width,
-                "actual_height": actual_height,
-                "json_width": json_width,
-                "json_height": json_height,
-                "dimension_match": dimension_match,
-                "rotation": (
-                    rotation
-                    if rotation is not None
-                    else ""
-                ),
-                "status": status,
-                "coco_bbox": str(coco_bbox),
+                "rect": str(rect),
+                "raw_size":
+                    f"{raw_width}x{raw_height}",
+                "corrected_size":
+                    f"{corrected_width}x{corrected_height}",
+                "exif_orientation":
+                    orientation,
+                "status":
+                    "VALID",
             }
         )
 
     return (
-        actual_width,
-        actual_height,
-        valid_boxes,
+        corrected_width,
+        corrected_height,
+        orientation,
+        coco_boxes,
     )
 
 
 # ============================================================
-# UNIQUE OUTPUT FILENAME
+# OUTPUT FILENAME
 # ============================================================
 
-def unique_filename(item):
+def make_filename(item):
 
     image_path = item["image"]
 
     case_name = item["case"]
 
-    # Example:
-    #
-    # basic_train_caseA/
-    # basketball/
-    # imgs/
-    #
-    # category = basketball
-
     category = (
-        image_path.parent.parent.name
+        image_path
+        .parent
+        .parent
+        .name
     )
 
     return (
@@ -878,13 +778,13 @@ def unique_filename(item):
 
 
 # ============================================================
-# CREATE COCO SPLIT
+# CREATE SPLIT
 # ============================================================
 
 def create_split(
     items,
     split_name,
-    diagnostic_rows,
+    diagnostics,
 ):
 
     image_dir = (
@@ -901,10 +801,10 @@ def create_split(
     coco = {
 
         "info": {
-            "description": (
-                "Ball Detection Dataset"
-            ),
-            "version": "1.0",
+            "description":
+                "Ball Detection Dataset",
+            "version":
+                "1.0",
         },
 
         "licenses": [],
@@ -913,73 +813,52 @@ def create_split(
 
         "annotations": [],
 
-        "categories": CATEGORIES,
+        "categories":
+            CATEGORIES,
     }
 
     image_id = 1
-
     annotation_id = 1
 
-    copied_names = set()
-
-    skipped_images = 0
+    skipped = 0
 
     for item in items:
 
-        image_path = item["image"]
-
         try:
 
-            width, height, boxes = (
-                process_image(
-                    item,
-                    diagnostic_rows,
-                )
+            (
+                width,
+                height,
+                orientation,
+                boxes,
+            ) = process_image(
+                item,
+                diagnostics,
             )
 
         except Exception as e:
 
             print(
                 f"\n[ERROR]"
-                f"\n{image_path}"
+                f"\n{item['image']}"
                 f"\n{e}"
             )
 
-            skipped_images += 1
+            skipped += 1
 
             continue
 
         # ----------------------------------------------------
-        # If no valid boxes, skip image
+        # IMPORTANT:
+        #
+        # If an image has zero annotations, we keep it only
+        # if you want negative/background images.
+        #
+        # For ball detection, we keep it here.
         # ----------------------------------------------------
 
-        if len(boxes) == 0:
-
-            skipped_images += 1
-
-            continue
-
-        # ----------------------------------------------------
-        # Filename
-        # ----------------------------------------------------
-
-        filename = unique_filename(
+        filename = make_filename(
             item
-        )
-
-        if filename in copied_names:
-
-            print(
-                f"\n[ERROR] Duplicate filename:"
-                f"\n{filename}"
-            )
-
-            skipped_images += 1
-
-            continue
-
-        copied_names.add(
-            filename
         )
 
         destination = (
@@ -987,13 +866,46 @@ def create_split(
             filename
         )
 
-        shutil.copy2(
-            image_path,
-            destination
-        )
+        # ----------------------------------------------------
+        # Copy image
+        # ----------------------------------------------------
+
+        try:
+
+            with Image.open(
+                item["image"]
+            ) as img:
+
+                if USE_EXIF_ORIENTATION:
+
+                    img = ImageOps.exif_transpose(
+                        img
+                    )
+
+                # Save physically corrected image
+                #
+                # This removes the dependency on EXIF
+                # orientation during training.
+
+                img.save(
+                    destination,
+                    quality=95
+                )
+
+        except Exception as e:
+
+            print(
+                f"\n[ERROR] Could not save:"
+                f"\n{item['image']}"
+                f"\n{e}"
+            )
+
+            skipped += 1
+
+            continue
 
         # ----------------------------------------------------
-        # COCO image
+        # COCO IMAGE
         # ----------------------------------------------------
 
         coco["images"].append(
@@ -1006,7 +918,7 @@ def create_split(
         )
 
         # ----------------------------------------------------
-        # COCO annotations
+        # COCO BOXES
         # ----------------------------------------------------
 
         for bbox in boxes:
@@ -1015,17 +927,28 @@ def create_split(
 
             coco["annotations"].append(
                 {
-                    "id": annotation_id,
-                    "image_id": image_id,
-                    "category_id": 1,
-                    "bbox": [
-                        x,
-                        y,
-                        w,
-                        h,
-                    ],
-                    "area": w * h,
-                    "iscrowd": 0,
+                    "id":
+                        annotation_id,
+
+                    "image_id":
+                        image_id,
+
+                    "category_id":
+                        1,
+
+                    "bbox":
+                        [
+                            x,
+                            y,
+                            w,
+                            h,
+                        ],
+
+                    "area":
+                        w * h,
+
+                    "iscrowd":
+                        0,
                 }
             )
 
@@ -1080,15 +1003,13 @@ def create_split(
 
     print(
         f"  Skipped     : "
-        f"{skipped_images}"
+        f"{skipped}"
     )
 
     print(
         f"  JSON        : "
         f"{json_path}"
     )
-
-    return coco
 
 
 # ============================================================
@@ -1097,7 +1018,7 @@ def create_split(
 
 def save_diagnostics(rows):
 
-    path = (
+    output = (
         OUTPUT_ROOT /
         "bbox_diagnostics.csv"
     )
@@ -1106,19 +1027,15 @@ def save_diagnostics(rows):
         "image",
         "json",
         "ball_index",
-        "source_rect",
-        "actual_width",
-        "actual_height",
-        "json_width",
-        "json_height",
-        "dimension_match",
-        "rotation",
+        "rect",
+        "raw_size",
+        "corrected_size",
+        "exif_orientation",
         "status",
-        "coco_bbox",
     ]
 
     with open(
-        path,
+        output,
         "w",
         newline="",
         encoding="utf-8"
@@ -1134,8 +1051,8 @@ def save_diagnostics(rows):
         writer.writerows(rows)
 
     print(
-        f"\nDiagnostics saved:"
-        f"\n  {path}"
+        f"\nDiagnostics:"
+        f"\n{output}"
     )
 
 
@@ -1151,7 +1068,7 @@ def main():
     )
 
     print(
-        "ROBUST COCO DATASET CONVERTER"
+        "COCO DATASET CONVERTER"
     )
 
     print(
@@ -1159,95 +1076,37 @@ def main():
     )
 
     print(
-        f"\nSource:"
-        f"\n  {SOURCE_ROOT}"
+        "\nIMPORTANT:"
     )
 
     print(
-        f"\nOutput:"
-        f"\n  {OUTPUT_ROOT}"
+        "Source rect = [x1, y1, x2, y2]"
     )
 
     print(
-        "\nIncluded:"
-    )
-
-    for case in SELECTED_CASES:
-
-        print(
-            f"  + {case}"
-        )
-
-    print(
-        "\nExcluded:"
-    )
-
-    for folder in sorted(
-        EXCLUDED_FOLDERS
-    ):
-
-        print(
-            f"  - {folder}"
-        )
-
-    print(
-        "\nSource rect interpretation:"
+        "COCO bbox  = [x, y, width, height]"
     )
 
     print(
-        "  [x1, y1, x2, y2]"
-    )
-
-    print(
-        "\nCOCO output:"
-    )
-
-    print(
-        "  [x, y, width, height]"
-    )
-
-    print(
-        "\nRotation mode:"
-    )
-
-    print(
-        f"  {ROTATION}"
+        "EXIF orientation correction = ON"
     )
 
     # --------------------------------------------------------
-    # Validate split
-    # --------------------------------------------------------
-
-    total_ratio = (
-        TRAIN_RATIO +
-        VAL_RATIO +
-        TEST_RATIO
-    )
-
-    if abs(
-        total_ratio - 1.0
-    ) > 0.0001:
-
-        raise ValueError(
-            "Split ratios must sum to 1.0"
-        )
-
-    # --------------------------------------------------------
-    # Find pairs
+    # Find all data
     # --------------------------------------------------------
 
     pairs = find_pairs()
 
+    print(
+        f"\nImage/JSON pairs found:"
+        f" {len(pairs)}"
+    )
+
     if not pairs:
-
-        print(
-            "\nNo images found."
-        )
-
         return
 
     # --------------------------------------------------------
-    # Shuffle
+    # Random split
     # --------------------------------------------------------
 
     random.seed(
@@ -1258,20 +1117,14 @@ def main():
         pairs
     )
 
-    # --------------------------------------------------------
-    # Split
-    # --------------------------------------------------------
-
     total = len(pairs)
 
     train_count = int(
-        total *
-        TRAIN_RATIO
+        total * TRAIN_RATIO
     )
 
     val_count = int(
-        total *
-        VAL_RATIO
+        total * VAL_RATIO
     )
 
     train_items = pairs[
@@ -1288,39 +1141,23 @@ def main():
     ]
 
     print(
-        "\n" +
-        "=" * 70
+        "\nSPLIT:"
     )
 
     print(
-        "SPLIT"
+        f"Train: {len(train_items)}"
     )
 
     print(
-        "=" * 70
+        f"Val  : {len(val_items)}"
     )
 
     print(
-        f"Total : {total}"
-    )
-
-    print(
-        f"Train : {len(train_items)} "
-        f"({len(train_items)/total*100:.2f}%)"
-    )
-
-    print(
-        f"Val   : {len(val_items)} "
-        f"({len(val_items)/total*100:.2f}%)"
-    )
-
-    print(
-        f"Test  : {len(test_items)} "
-        f"({len(test_items)/total*100:.2f}%)"
+        f"Test : {len(test_items)}"
     )
 
     # --------------------------------------------------------
-    # Remove old output
+    # Delete old output
     # --------------------------------------------------------
 
     if OUTPUT_ROOT.exists():
@@ -1331,14 +1168,13 @@ def main():
         )
 
         answer = input(
-            "\nDelete it and recreate? "
-            "[y/N]: "
+            "Delete it? [y/N]: "
         ).strip().lower()
 
         if answer != "y":
 
             print(
-                "\nStopped."
+                "Stopped."
             )
 
             return
@@ -1356,45 +1192,45 @@ def main():
     # Diagnostics
     # --------------------------------------------------------
 
-    diagnostic_rows = []
+    diagnostics = []
 
     # --------------------------------------------------------
-    # Create splits
+    # Create datasets
     # --------------------------------------------------------
 
     create_split(
         train_items,
         "train",
-        diagnostic_rows,
+        diagnostics,
     )
 
     create_split(
         val_items,
         "val",
-        diagnostic_rows,
+        diagnostics,
     )
 
     create_split(
         test_items,
         "test",
-        diagnostic_rows,
+        diagnostics,
     )
 
     # --------------------------------------------------------
-    # Diagnostics CSV
+    # Save diagnostics
     # --------------------------------------------------------
 
     save_diagnostics(
-        diagnostic_rows
+        diagnostics
     )
 
     # --------------------------------------------------------
     # Statistics
     # --------------------------------------------------------
 
-    status_counts = Counter(
+    counts = Counter(
         row["status"]
-        for row in diagnostic_rows
+        for row in diagnostics
     )
 
     print(
@@ -1403,23 +1239,21 @@ def main():
     )
 
     print(
-        "ANNOTATION DIAGNOSTICS"
+        "ANNOTATION SUMMARY"
     )
 
     print(
         "=" * 70
     )
 
-    for status, count in (
-        status_counts.items()
-    ):
+    for status, count in counts.items():
 
         print(
-            f"{status:15s}: {count}"
+            f"{status:30s}: {count}"
         )
 
     # --------------------------------------------------------
-    # Final structure
+    # Final
     # --------------------------------------------------------
 
     print(
