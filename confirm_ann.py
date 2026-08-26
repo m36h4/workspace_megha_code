@@ -1,6 +1,8 @@
 import json
+import random
 from pathlib import Path
-from collections import Counter, defaultdict
+
+from PIL import Image, ImageDraw
 
 
 # ============================================================
@@ -8,6 +10,8 @@ from collections import Counter, defaultdict
 # ============================================================
 
 ROOT = Path("/home/eng_megha/balldataset")
+
+OUTPUT = ROOT / "annotation_visualization"
 
 CASES = [
     "AI_train_caseB",
@@ -22,44 +26,385 @@ EXCLUDED = {
     "volleyball",
 }
 
+# Number of images PER folder
+SAMPLES_PER_FOLDER = 5
+
+RANDOM_SEED = 42
+
 
 # ============================================================
-# HELPERS
+# IMAGE EXTENSIONS
 # ============================================================
 
-def is_excluded(path):
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+}
 
-    return any(
-        part.lower() in EXCLUDED
-        for part in path.parts
-    )
 
+# ============================================================
+# DRAW XYXY
+# ============================================================
 
-def valid_xyxy(rect, width, height):
+def draw_xyxy(image, rect):
+
+    img = image.copy()
+
+    draw = ImageDraw.Draw(img)
 
     x1, y1, x2, y2 = rect
 
-    return (
-        x1 >= 0
-        and y1 >= 0
-        and x2 > x1
-        and y2 > y1
-        and x2 <= width
-        and y2 <= height
+    # Normalize in case coordinates are reversed
+    left = min(x1, x2)
+    right = max(x1, x2)
+
+    top = min(y1, y2)
+    bottom = max(y1, y2)
+
+    draw.rectangle(
+        [
+            left,
+            top,
+            right,
+            bottom,
+        ],
+        outline="red",
+        width=4,
     )
 
+    draw.text(
+        (
+            left,
+            max(0, top - 20),
+        ),
+        "XYXY",
+        fill="red",
+    )
 
-def valid_xywh(rect, width, height):
+    return img
+
+
+# ============================================================
+# DRAW XYWH
+# ============================================================
+
+def draw_xywh(image, rect):
+
+    img = image.copy()
+
+    draw = ImageDraw.Draw(img)
 
     x, y, w, h = rect
 
-    return (
-        x >= 0
-        and y >= 0
-        and w > 0
-        and h > 0
-        and x + w <= width
-        and y + h <= height
+    draw.rectangle(
+        [
+            x,
+            y,
+            x + w,
+            y + h,
+        ],
+        outline="blue",
+        width=4,
+    )
+
+    draw.text(
+        (
+            x,
+            max(0, y - 20),
+        ),
+        "XYWH",
+        fill="blue",
+    )
+
+    return img
+
+
+# ============================================================
+# DRAW BOTH
+# ============================================================
+
+def draw_both(image, rect):
+
+    img = image.copy()
+
+    draw = ImageDraw.Draw(img)
+
+    # -------------------------
+    # XYXY
+    # -------------------------
+
+    x1, y1, x2, y2 = rect
+
+    left = min(x1, x2)
+    right = max(x1, x2)
+
+    top = min(y1, y2)
+    bottom = max(y1, y2)
+
+    draw.rectangle(
+        [
+            left,
+            top,
+            right,
+            bottom,
+        ],
+        outline="red",
+        width=4,
+    )
+
+    draw.text(
+        (
+            left,
+            max(0, top - 20),
+        ),
+        "XYXY",
+        fill="red",
+    )
+
+    # -------------------------
+    # XYWH
+    # -------------------------
+
+    x, y, w, h = rect
+
+    draw.rectangle(
+        [
+            x,
+            y,
+            x + w,
+            y + h,
+        ],
+        outline="blue",
+        width=4,
+    )
+
+    draw.text(
+        (
+            x,
+            max(0, y - 20),
+        ),
+        "XYWH",
+        fill="blue",
+    )
+
+    return img
+
+
+# ============================================================
+# PROCESS ONE IMAGE
+# ============================================================
+
+def process_image(
+    image_path,
+    json_path,
+    output_xyxy,
+    output_xywh,
+    output_both,
+):
+
+    try:
+
+        with open(
+            json_path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            data = json.load(f)
+
+    except Exception as e:
+
+        print(
+            f"[ERROR] JSON:"
+            f" {json_path}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Open image
+    # --------------------------------------------------------
+
+    try:
+
+        image = Image.open(
+            image_path
+        ).convert("RGB")
+
+    except Exception as e:
+
+        print(
+            f"[ERROR] Image:"
+            f" {image_path}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Get balls
+    # --------------------------------------------------------
+
+    balls = (
+        data
+        .get("data", {})
+        .get("ball", [])
+    )
+
+    if not balls:
+
+        return
+
+    # --------------------------------------------------------
+    # Draw every ball
+    # --------------------------------------------------------
+
+    xyxy_image = image.copy()
+    xywh_image = image.copy()
+    both_image = image.copy()
+
+    xyxy_draw = ImageDraw.Draw(
+        xyxy_image
+    )
+
+    xywh_draw = ImageDraw.Draw(
+        xywh_image
+    )
+
+    both_draw = ImageDraw.Draw(
+        both_image
+    )
+
+    for ball in balls:
+
+        try:
+
+            rect = (
+                ball[
+                    "entire"
+                ][
+                    "rect"
+                ]
+            )
+
+        except Exception:
+
+            continue
+
+        if len(rect) != 4:
+            continue
+
+        x1, y1, x2, y2 = [
+            float(v)
+            for v in rect
+        ]
+
+        # ====================================================
+        # XYXY
+        # ====================================================
+
+        left = min(x1, x2)
+        right = max(x1, x2)
+
+        top = min(y1, y2)
+        bottom = max(y1, y2)
+
+        xyxy_draw.rectangle(
+            [
+                left,
+                top,
+                right,
+                bottom,
+            ],
+            outline="red",
+            width=5,
+        )
+
+        xyxy_draw.text(
+            (
+                left,
+                max(0, top - 20),
+            ),
+            "XYXY",
+            fill="red",
+        )
+
+        # ====================================================
+        # XYWH
+        # ====================================================
+
+        x = x1
+        y = y1
+        w = x2
+        h = y2
+
+        xywh_draw.rectangle(
+            [
+                x,
+                y,
+                x + w,
+                y + h,
+            ],
+            outline="blue",
+            width=5,
+        )
+
+        xywh_draw.text(
+            (
+                x,
+                max(0, y - 20),
+            ),
+            "XYWH",
+            fill="blue",
+        )
+
+        # ====================================================
+        # BOTH
+        # ====================================================
+
+        both_draw.rectangle(
+            [
+                left,
+                top,
+                right,
+                bottom,
+            ],
+            outline="red",
+            width=5,
+        )
+
+        both_draw.rectangle(
+            [
+                x,
+                y,
+                x + w,
+                y + h,
+            ],
+            outline="blue",
+            width=5,
+        )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    filename = image_path.name
+
+    xyxy_image.save(
+        output_xyxy / filename,
+        quality=95,
+    )
+
+    xywh_image.save(
+        output_xywh / filename,
+        quality=95,
+    )
+
+    both_image.save(
+        output_both / filename,
+        quality=95,
     )
 
 
@@ -69,32 +414,73 @@ def valid_xywh(rect, width, height):
 
 def main():
 
-    overall = Counter()
+    random.seed(
+        RANDOM_SEED
+    )
 
-    by_case = defaultdict(Counter)
+    # --------------------------------------------------------
+    # Remove old visualization
+    # --------------------------------------------------------
 
-    xyxy_only = []
-    xywh_only = []
-    both_valid = []
-    neither_valid = []
+    if OUTPUT.exists():
 
-    total_images = 0
-    total_boxes = 0
+        print(
+            f"Removing old:"
+            f" {OUTPUT}"
+        )
+
+        import shutil
+
+        shutil.rmtree(
+            OUTPUT
+        )
+
+    OUTPUT.mkdir(
+        parents=True
+    )
+
+    total = 0
+
+    # ========================================================
+    # CASES
+    # ========================================================
 
     for case in CASES:
 
-        case_root = ROOT / case
-
-        print(
-            f"\nScanning: {case}"
+        case_root = (
+            ROOT /
+            case
         )
 
-        for imgs_dir in case_root.rglob("imgs"):
+        print(
+            f"\n{'=' * 60}"
+        )
+
+        print(
+            f"CASE: {case}"
+        )
+
+        print(
+            f"{'=' * 60}"
+        )
+
+        # ----------------------------------------------------
+        # Find imgs folders
+        # ----------------------------------------------------
+
+        for imgs_dir in sorted(
+            case_root.rglob("imgs")
+        ):
 
             if not imgs_dir.is_dir():
                 continue
 
-            if is_excluded(imgs_dir):
+            # Ignore excluded folders
+            if any(
+                part.lower()
+                in EXCLUDED
+                for part in imgs_dir.parts
+            ):
                 continue
 
             labels_dir = (
@@ -105,15 +491,30 @@ def main():
             if not labels_dir.exists():
                 continue
 
-            for image_path in imgs_dir.iterdir():
+            # Category name
+            category = (
+                imgs_dir
+                .parent
+                .name
+            )
 
-                if image_path.suffix.lower() not in {
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".bmp",
-                    ".webp",
-                }:
+            # ------------------------------------------------
+            # Find images
+            # ------------------------------------------------
+
+            images = []
+
+            for image_path in (
+                imgs_dir.iterdir()
+            ):
+
+                if not image_path.is_file():
+                    continue
+
+                if (
+                    image_path.suffix.lower()
+                    not in IMAGE_EXTENSIONS
+                ):
                     continue
 
                 json_path = (
@@ -121,386 +522,136 @@ def main():
                     f"{image_path.stem}.json"
                 )
 
-                if not json_path.exists():
-                    continue
+                if json_path.exists():
 
-                total_images += 1
-
-                try:
-
-                    with open(
-                        json_path,
-                        "r",
-                        encoding="utf-8"
-                    ) as f:
-
-                        data = json.load(f)
-
-                except Exception:
-
-                    overall["bad_json"] += 1
-                    continue
-
-                # ------------------------------------------------
-                # Dimensions from JSON
-                # ------------------------------------------------
-
-                dimensions = data.get(
-                    "dimensions"
-                )
-
-                if (
-                    not isinstance(dimensions, list)
-                    or len(dimensions) != 2
-                ):
-
-                    overall["bad_dimensions"] += 1
-                    continue
-
-                width = float(
-                    dimensions[0]
-                )
-
-                height = float(
-                    dimensions[1]
-                )
-
-                # ------------------------------------------------
-                # Balls
-                # ------------------------------------------------
-
-                balls = (
-                    data
-                    .get("data", {})
-                    .get("ball", [])
-                )
-
-                for ball_index, ball in enumerate(
-                    balls
-                ):
-
-                    total_boxes += 1
-
-                    try:
-
-                        rect = (
-                            ball
-                            ["entire"]
-                            ["rect"]
+                    images.append(
+                        (
+                            image_path,
+                            json_path,
                         )
-
-                        rect = [
-                            float(v)
-                            for v in rect
-                        ]
-
-                    except Exception:
-
-                        overall["bad_rect"] += 1
-                        continue
-
-                    if len(rect) != 4:
-
-                        overall["bad_rect"] += 1
-                        continue
-
-                    xyxy = valid_xyxy(
-                        rect,
-                        width,
-                        height
                     )
 
-                    xywh = valid_xywh(
-                        rect,
-                        width,
-                        height
-                    )
+            if not images:
+                continue
 
-                    # ------------------------------------------------
-                    # Classify
-                    # ------------------------------------------------
+            # ------------------------------------------------
+            # Random sample
+            # ------------------------------------------------
 
-                    if xyxy and not xywh:
+            sample = random.sample(
+                images,
+                min(
+                    SAMPLES_PER_FOLDER,
+                    len(images),
+                ),
+            )
 
-                        result = "XYXY_ONLY"
+            print(
+                f"\n{category}: "
+                f"{len(images)} images"
+            )
 
-                        xyxy_only.append(
-                            (
-                                case,
-                                str(json_path),
-                                rect,
-                                dimensions,
-                            )
-                        )
+            print(
+                f"Visualizing "
+                f"{len(sample)}"
+            )
 
-                    elif xywh and not xyxy:
+            # ------------------------------------------------
+            # Output folders
+            # ------------------------------------------------
 
-                        result = "XYWH_ONLY"
+            xyxy_dir = (
+                OUTPUT /
+                "XYXY" /
+                case /
+                category
+            )
 
-                        xywh_only.append(
-                            (
-                                case,
-                                str(json_path),
-                                rect,
-                                dimensions,
-                            )
-                        )
+            xywh_dir = (
+                OUTPUT /
+                "XYWH" /
+                case /
+                category
+            )
 
-                    elif xyxy and xywh:
+            both_dir = (
+                OUTPUT /
+                "BOTH" /
+                case /
+                category
+            )
 
-                        result = "BOTH_VALID"
+            xyxy_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-                        both_valid.append(
-                            (
-                                case,
-                                str(json_path),
-                                rect,
-                                dimensions,
-                            )
-                        )
+            xywh_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-                    else:
+            both_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-                        result = "NEITHER_VALID"
+            # ------------------------------------------------
+            # Process
+            # ------------------------------------------------
 
-                        neither_valid.append(
-                            (
-                                case,
-                                str(json_path),
-                                rect,
-                                dimensions,
-                            )
-                        )
+            for image_path, json_path in sample:
 
-                    overall[result] += 1
-                    by_case[case][result] += 1
+                process_image(
+                    image_path,
+                    json_path,
+                    xyxy_dir,
+                    xywh_dir,
+                    both_dir,
+                )
 
-    # ========================================================
-    # RESULTS
-    # ========================================================
-
-    print(
-        "\n" +
-        "=" * 75
-    )
-
-    print(
-        "OVERALL RESULT"
-    )
-
-    print(
-        "=" * 75
-    )
-
-    print(
-        f"Images : {total_images}"
-    )
-
-    print(
-        f"Boxes  : {total_boxes}"
-    )
-
-    print()
-
-    for key in [
-        "XYXY_ONLY",
-        "XYWH_ONLY",
-        "BOTH_VALID",
-        "NEITHER_VALID",
-        "bad_json",
-        "bad_dimensions",
-        "bad_rect",
-    ]:
-
-        print(
-            f"{key:20s}: "
-            f"{overall[key]}"
-        )
+                total += 1
 
     # ========================================================
-    # PER CASE
+    # DONE
     # ========================================================
 
     print(
         "\n" +
-        "=" * 75
+        "=" * 60
     )
 
     print(
-        "RESULT BY CASE"
+        "DONE"
     )
 
     print(
-        "=" * 75
-    )
-
-    for case in CASES:
-
-        c = by_case[case]
-
-        xyxy = c["XYXY_ONLY"]
-        xywh = c["XYWH_ONLY"]
-        both = c["BOTH_VALID"]
-        neither = c["NEITHER_VALID"]
-
-        print(
-            f"\n{case}"
-        )
-
-        print(
-            f"  XYXY only    : {xyxy}"
-        )
-
-        print(
-            f"  XYWH only    : {xywh}"
-        )
-
-        print(
-            f"  Both valid   : {both}"
-        )
-
-        print(
-            f"  Neither      : {neither}"
-        )
-
-    # ========================================================
-    # EXAMPLES
-    # ========================================================
-
-    print(
-        "\n" +
-        "=" * 75
+        "=" * 60
     )
 
     print(
-        "XYXY-ONLY EXAMPLES"
+        f"Images visualized: {total}"
     )
 
     print(
-        "=" * 75
-    )
-
-    for item in xyxy_only[:10]:
-
-        case, path, rect, dims = item
-
-        print(
-            f"\n{case}"
-        )
-
-        print(
-            f"  {path}"
-        )
-
-        print(
-            f"  dimensions = {dims}"
-        )
-
-        print(
-            f"  rect       = {rect}"
-        )
-
-    print(
-        "\n" +
-        "=" * 75
+        f"\nOutput:"
+        f"\n{OUTPUT}"
     )
 
     print(
-        "XYWH-ONLY EXAMPLES"
+        "\nCompare:"
     )
 
     print(
-        "=" * 75
-    )
-
-    for item in xywh_only[:10]:
-
-        case, path, rect, dims = item
-
-        print(
-            f"\n{case}"
-        )
-
-        print(
-            f"  {path}"
-        )
-
-        print(
-            f"  dimensions = {dims}"
-        )
-
-        print(
-            f"  rect       = {rect}"
-        )
-
-    print(
-        "\n" +
-        "=" * 75
+        f"  {OUTPUT}/XYXY/"
     )
 
     print(
-        "BOTH-VALID EXAMPLES"
+        f"  {OUTPUT}/XYWH/"
     )
 
     print(
-        "=" * 75
-    )
-
-    for item in both_valid[:10]:
-
-        case, path, rect, dims = item
-
-        print(
-            f"\n{case}"
-        )
-
-        print(
-            f"  {path}"
-        )
-
-        print(
-            f"  dimensions = {dims}"
-        )
-
-        print(
-            f"  rect       = {rect}"
-        )
-
-    print(
-        "\n" +
-        "=" * 75
-    )
-
-    print(
-        "NEITHER-VALID EXAMPLES"
-    )
-
-    print(
-        "=" * 75
-    )
-
-    for item in neither_valid[:10]:
-
-        case, path, rect, dims = item
-
-        print(
-            f"\n{case}"
-        )
-
-        print(
-            f"  {path}"
-        )
-
-        print(
-            f"  dimensions = {dims}"
-        )
-
-        print(
-            f"  rect       = {rect}"
-        )
-
-    print(
-        "\nDONE."
+        f"  {OUTPUT}/BOTH/"
     )
 
 
