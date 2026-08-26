@@ -2,123 +2,70 @@ import json
 import random
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from PIL import Image
 
 
-# ============================================================
-# CHANGE THIS IF NEEDED
-# ============================================================
-
 DATASET = Path("/home/eng_megha/balldataset_coco")
 
-SPLIT = "train"       # train / val / test
+SPLIT = "train"
 NUM_IMAGES = 10
 
-
-# ============================================================
-# LOAD COCO
-# ============================================================
-
-json_path = (
-    DATASET /
-    "annotations" /
-    f"instances_{SPLIT}.json"
-)
-
-image_dir = (
-    DATASET /
-    "images" /
-    SPLIT
-)
+OUTPUT = DATASET / "visualizations"
+OUTPUT.mkdir(exist_ok=True)
 
 
+# Load COCO
 with open(
-    json_path,
+    DATASET / "annotations" / f"instances_{SPLIT}.json",
     "r",
     encoding="utf-8"
 ) as f:
-
     coco = json.load(f)
 
 
-# ============================================================
-# INDEX ANNOTATIONS
-# ============================================================
-
-annotations = {}
+# Image ID -> annotations
+anns = {}
 
 for ann in coco["annotations"]:
-
-    image_id = ann["image_id"]
-
-    if image_id not in annotations:
-        annotations[image_id] = []
-
-    annotations[image_id].append(ann)
+    anns.setdefault(ann["image_id"], []).append(ann)
 
 
-# ============================================================
-# RANDOM IMAGES
-# ============================================================
-
-images = coco["images"]
-
-random.shuffle(images)
-
-images = images[
-    :min(NUM_IMAGES, len(images))
-]
+# Random images
+images = random.sample(
+    coco["images"],
+    min(NUM_IMAGES, len(coco["images"]))
+)
 
 
-# ============================================================
-# VISUALIZE
-# ============================================================
-
-for img_info in images:
-
-    image_id = img_info["id"]
-
-    filename = img_info["file_name"]
+for i, info in enumerate(images):
 
     image_path = (
-        image_dir /
-        filename
+        DATASET /
+        "images" /
+        SPLIT /
+        info["file_name"]
     )
 
     if not image_path.exists():
-
-        print(
-            f"Missing image: {image_path}"
-        )
-
+        print("Missing:", image_path)
         continue
 
-    image = Image.open(
-        image_path
-    ).convert("RGB")
+    image = Image.open(image_path).convert("RGB")
 
-    fig, ax = plt.subplots(
-        figsize=(10, 8)
-    )
+    fig, ax = plt.subplots(figsize=(10, 8))
 
     ax.imshow(image)
 
-    # --------------------------------------------------------
-    # Draw boxes
-    # --------------------------------------------------------
-
-    anns = annotations.get(
-        image_id,
-        []
-    )
-
-    for ann in anns:
+    for ann in anns.get(info["id"], []):
 
         x, y, w, h = ann["bbox"]
 
-        box = patches.Rectangle(
+        rect = patches.Rectangle(
             (x, y),
             w,
             h,
@@ -127,24 +74,30 @@ for img_info in images:
             facecolor="none",
         )
 
-        ax.add_patch(box)
-
-        ax.text(
-            x,
-            max(0, y - 5),
-            "ball",
-            fontsize=10,
-            color="red",
-            backgroundcolor="white",
-        )
+        ax.add_patch(rect)
 
     ax.set_title(
-        f"{SPLIT}: {filename}\n"
-        f"Boxes: {len(anns)}"
+        f"Image {i + 1} | Boxes: "
+        f"{len(anns.get(info['id'], []))}"
     )
 
     ax.axis("off")
 
-    plt.tight_layout()
+    output_file = (
+        OUTPUT /
+        f"{SPLIT}_{i + 1}.jpg"
+    )
 
-    plt.show()
+    plt.savefig(
+        output_file,
+        dpi=150,
+        bbox_inches="tight"
+    )
+
+    plt.close()
+
+    print("Saved:", output_file)
+
+
+print("\nDone.")
+print("Open:", OUTPUT)
