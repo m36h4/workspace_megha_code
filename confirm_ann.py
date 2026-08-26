@@ -1,8 +1,9 @@
 import json
 import random
 from pathlib import Path
+from collections import Counter, defaultdict
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 
 # ============================================================
@@ -10,8 +11,6 @@ from PIL import Image, ImageDraw
 # ============================================================
 
 ROOT = Path("/home/eng_megha/balldataset")
-
-OUTPUT = ROOT / "annotation_visualization"
 
 CASES = [
     "AI_train_caseB",
@@ -26,15 +25,9 @@ EXCLUDED = {
     "volleyball",
 }
 
-# Number of images PER folder
-SAMPLES_PER_FOLDER = 5
+OUTPUT = ROOT / "format_proof"
 
-RANDOM_SEED = 42
-
-
-# ============================================================
-# IMAGE EXTENSIONS
-# ============================================================
+SAMPLES_PER_TYPE = 20
 
 IMAGE_EXTENSIONS = {
     ".jpg",
@@ -46,366 +39,177 @@ IMAGE_EXTENSIONS = {
 
 
 # ============================================================
-# DRAW XYXY
+# VALIDITY
 # ============================================================
 
-def draw_xyxy(image, rect):
-
-    img = image.copy()
-
-    draw = ImageDraw.Draw(img)
+def valid_xyxy(rect, W, H):
 
     x1, y1, x2, y2 = rect
 
-    # Normalize in case coordinates are reversed
-    left = min(x1, x2)
-    right = max(x1, x2)
-
-    top = min(y1, y2)
-    bottom = max(y1, y2)
-
-    draw.rectangle(
-        [
-            left,
-            top,
-            right,
-            bottom,
-        ],
-        outline="red",
-        width=4,
+    return (
+        x1 >= 0
+        and y1 >= 0
+        and x2 > x1
+        and y2 > y1
+        and x2 <= W
+        and y2 <= H
     )
 
-    draw.text(
-        (
-            left,
-            max(0, top - 20),
-        ),
-        "XYXY",
-        fill="red",
-    )
 
-    return img
-
-
-# ============================================================
-# DRAW XYWH
-# ============================================================
-
-def draw_xywh(image, rect):
-
-    img = image.copy()
-
-    draw = ImageDraw.Draw(img)
+def valid_xywh(rect, W, H):
 
     x, y, w, h = rect
 
-    draw.rectangle(
-        [
-            x,
-            y,
-            x + w,
-            y + h,
-        ],
-        outline="blue",
-        width=4,
+    return (
+        x >= 0
+        and y >= 0
+        and w > 0
+        and h > 0
+        and x + w <= W
+        and y + h <= H
     )
-
-    draw.text(
-        (
-            x,
-            max(0, y - 20),
-        ),
-        "XYWH",
-        fill="blue",
-    )
-
-    return img
 
 
 # ============================================================
-# DRAW BOTH
+# DRAW BOX
 # ============================================================
 
-def draw_both(image, rect):
-
-    img = image.copy()
-
-    draw = ImageDraw.Draw(img)
-
-    # -------------------------
-    # XYXY
-    # -------------------------
-
-    x1, y1, x2, y2 = rect
-
-    left = min(x1, x2)
-    right = max(x1, x2)
-
-    top = min(y1, y2)
-    bottom = max(y1, y2)
-
-    draw.rectangle(
-        [
-            left,
-            top,
-            right,
-            bottom,
-        ],
-        outline="red",
-        width=4,
-    )
-
-    draw.text(
-        (
-            left,
-            max(0, top - 20),
-        ),
-        "XYXY",
-        fill="red",
-    )
-
-    # -------------------------
-    # XYWH
-    # -------------------------
-
-    x, y, w, h = rect
-
-    draw.rectangle(
-        [
-            x,
-            y,
-            x + w,
-            y + h,
-        ],
-        outline="blue",
-        width=4,
-    )
-
-    draw.text(
-        (
-            x,
-            max(0, y - 20),
-        ),
-        "XYWH",
-        fill="blue",
-    )
-
-    return img
-
-
-# ============================================================
-# PROCESS ONE IMAGE
-# ============================================================
-
-def process_image(
-    image_path,
-    json_path,
-    output_xyxy,
-    output_xywh,
-    output_both,
+def draw_box(
+    image,
+    rect,
+    fmt,
+    color,
 ):
 
-    try:
+    img = image.copy()
 
-        with open(
-            json_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
+    draw = ImageDraw.Draw(img)
 
-            data = json.load(f)
+    if fmt == "XYXY":
 
-    except Exception as e:
+        x1, y1, x2, y2 = rect
 
-        print(
-            f"[ERROR] JSON:"
-            f" {json_path}"
-        )
+    else:
 
-        return
+        x, y, w, h = rect
 
-    # --------------------------------------------------------
-    # Open image
-    # --------------------------------------------------------
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
 
-    try:
-
-        image = Image.open(
-            image_path
-        ).convert("RGB")
-
-    except Exception as e:
-
-        print(
-            f"[ERROR] Image:"
-            f" {image_path}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Get balls
-    # --------------------------------------------------------
-
-    balls = (
-        data
-        .get("data", {})
-        .get("ball", [])
+    draw.rectangle(
+        [
+            x1,
+            y1,
+            x2,
+            y2,
+        ],
+        outline=color,
+        width=5,
     )
 
-    if not balls:
+    draw.text(
+        (
+            x1,
+            max(0, y1 - 25),
+        ),
+        fmt,
+        fill=color,
+    )
 
-        return
+    return img
+
+
+# ============================================================
+# SIDE BY SIDE
+# ============================================================
+
+def make_proof_image(
+    image,
+    rect,
+    filename,
+    classification,
+    W,
+    H,
+):
 
     # --------------------------------------------------------
-    # Draw every ball
+    # XYXY image
     # --------------------------------------------------------
 
-    xyxy_image = image.copy()
-    xywh_image = image.copy()
-    both_image = image.copy()
-
-    xyxy_draw = ImageDraw.Draw(
-        xyxy_image
+    left = draw_box(
+        image,
+        rect,
+        "XYXY",
+        "red",
     )
 
-    xywh_draw = ImageDraw.Draw(
-        xywh_image
+    # --------------------------------------------------------
+    # XYWH image
+    # --------------------------------------------------------
+
+    right = draw_box(
+        image,
+        rect,
+        "XYWH",
+        "blue",
     )
 
-    both_draw = ImageDraw.Draw(
-        both_image
+    # --------------------------------------------------------
+    # Same dimensions
+    # --------------------------------------------------------
+
+    gap = 20
+
+    combined = Image.new(
+        "RGB",
+        (
+            left.width * 2 + gap,
+            left.height,
+        ),
+        "white",
     )
 
-    for ball in balls:
+    combined.paste(
+        left,
+        (0, 0),
+    )
 
-        try:
-
-            rect = (
-                ball[
-                    "entire"
-                ][
-                    "rect"
-                ]
-            )
-
-        except Exception:
-
-            continue
-
-        if len(rect) != 4:
-            continue
-
-        x1, y1, x2, y2 = [
-            float(v)
-            for v in rect
-        ]
-
-        # ====================================================
-        # XYXY
-        # ====================================================
-
-        left = min(x1, x2)
-        right = max(x1, x2)
-
-        top = min(y1, y2)
-        bottom = max(y1, y2)
-
-        xyxy_draw.rectangle(
-            [
-                left,
-                top,
-                right,
-                bottom,
-            ],
-            outline="red",
-            width=5,
-        )
-
-        xyxy_draw.text(
-            (
-                left,
-                max(0, top - 20),
-            ),
-            "XYXY",
-            fill="red",
-        )
-
-        # ====================================================
-        # XYWH
-        # ====================================================
-
-        x = x1
-        y = y1
-        w = x2
-        h = y2
-
-        xywh_draw.rectangle(
-            [
-                x,
-                y,
-                x + w,
-                y + h,
-            ],
-            outline="blue",
-            width=5,
-        )
-
-        xywh_draw.text(
-            (
-                x,
-                max(0, y - 20),
-            ),
-            "XYWH",
-            fill="blue",
-        )
-
-        # ====================================================
-        # BOTH
-        # ====================================================
-
-        both_draw.rectangle(
-            [
-                left,
-                top,
-                right,
-                bottom,
-            ],
-            outline="red",
-            width=5,
-        )
-
-        both_draw.rectangle(
-            [
-                x,
-                y,
-                x + w,
-                y + h,
-            ],
-            outline="blue",
-            width=5,
-        )
+    combined.paste(
+        right,
+        (
+            left.width + gap,
+            0,
+        ),
+    )
 
     # --------------------------------------------------------
     # Save
     # --------------------------------------------------------
 
-    filename = image_path.name
+    filename = (
+        f"{classification}_"
+        f"{filename}"
+    )
 
-    xyxy_image.save(
-        output_xyxy / filename,
+    output_file = (
+        OUTPUT /
+        classification /
+        filename
+    )
+
+    output_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    combined.save(
+        output_file,
         quality=95,
     )
 
-    xywh_image.save(
-        output_xywh / filename,
-        quality=95,
-    )
-
-    both_image.save(
-        output_both / filename,
-        quality=95,
-    )
+    return output_file
 
 
 # ============================================================
@@ -414,72 +218,45 @@ def process_image(
 
 def main():
 
-    random.seed(
-        RANDOM_SEED
-    )
-
-    # --------------------------------------------------------
-    # Remove old visualization
-    # --------------------------------------------------------
-
-    if OUTPUT.exists():
-
-        print(
-            f"Removing old:"
-            f" {OUTPUT}"
-        )
-
-        import shutil
-
-        shutil.rmtree(
-            OUTPUT
-        )
+    random.seed(42)
 
     OUTPUT.mkdir(
-        parents=True
+        parents=True,
+        exist_ok=True,
     )
 
-    total = 0
+    overall = Counter()
+
+    per_case = defaultdict(
+        Counter
+    )
+
+    examples = defaultdict(list)
+
+    total_images = 0
+    total_boxes = 0
 
     # ========================================================
-    # CASES
+    # SCAN
     # ========================================================
 
     for case in CASES:
 
-        case_root = (
-            ROOT /
-            case
-        )
-
         print(
-            f"\n{'=' * 60}"
+            f"\nScanning: {case}"
         )
 
-        print(
-            f"CASE: {case}"
-        )
+        case_root = ROOT / case
 
-        print(
-            f"{'=' * 60}"
-        )
-
-        # ----------------------------------------------------
-        # Find imgs folders
-        # ----------------------------------------------------
-
-        for imgs_dir in sorted(
-            case_root.rglob("imgs")
-        ):
+        for imgs_dir in case_root.rglob("imgs"):
 
             if not imgs_dir.is_dir():
                 continue
 
-            # Ignore excluded folders
+            # Ignore unwanted directories
             if any(
-                part.lower()
-                in EXCLUDED
-                for part in imgs_dir.parts
+                p.lower() in EXCLUDED
+                for p in imgs_dir.parts
             ):
                 continue
 
@@ -491,25 +268,7 @@ def main():
             if not labels_dir.exists():
                 continue
 
-            # Category name
-            category = (
-                imgs_dir
-                .parent
-                .name
-            )
-
-            # ------------------------------------------------
-            # Find images
-            # ------------------------------------------------
-
-            images = []
-
-            for image_path in (
-                imgs_dir.iterdir()
-            ):
-
-                if not image_path.is_file():
-                    continue
+            for image_path in imgs_dir.iterdir():
 
                 if (
                     image_path.suffix.lower()
@@ -522,103 +281,381 @@ def main():
                     f"{image_path.stem}.json"
                 )
 
-                if json_path.exists():
+                if not json_path.exists():
+                    continue
 
-                    images.append(
-                        (
-                            image_path,
-                            json_path,
-                        )
-                    )
+                total_images += 1
 
-            if not images:
-                continue
+                try:
 
-            # ------------------------------------------------
-            # Random sample
-            # ------------------------------------------------
+                    with open(
+                        json_path,
+                        "r",
+                        encoding="utf-8",
+                    ) as f:
 
-            sample = random.sample(
-                images,
-                min(
-                    SAMPLES_PER_FOLDER,
-                    len(images),
-                ),
-            )
+                        data = json.load(f)
 
-            print(
-                f"\n{category}: "
-                f"{len(images)} images"
-            )
+                except Exception:
 
-            print(
-                f"Visualizing "
-                f"{len(sample)}"
-            )
+                    overall["BAD_JSON"] += 1
 
-            # ------------------------------------------------
-            # Output folders
-            # ------------------------------------------------
+                    continue
 
-            xyxy_dir = (
-                OUTPUT /
-                "XYXY" /
-                case /
-                category
-            )
+                # ------------------------------------------------
+                # ACTUAL IMAGE SIZE
+                # ------------------------------------------------
 
-            xywh_dir = (
-                OUTPUT /
-                "XYWH" /
-                case /
-                category
-            )
+                try:
 
-            both_dir = (
-                OUTPUT /
-                "BOTH" /
-                case /
-                category
-            )
+                    with Image.open(
+                        image_path
+                    ) as im:
 
-            xyxy_dir.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+                        W, H = im.size
 
-            xywh_dir.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+                except Exception:
 
-            both_dir.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+                    overall["BAD_IMAGE"] += 1
 
-            # ------------------------------------------------
-            # Process
-            # ------------------------------------------------
+                    continue
 
-            for image_path, json_path in sample:
-
-                process_image(
-                    image_path,
-                    json_path,
-                    xyxy_dir,
-                    xywh_dir,
-                    both_dir,
+                balls = (
+                    data
+                    .get("data", {})
+                    .get("ball", [])
                 )
 
-                total += 1
+                for ball_index, ball in enumerate(
+                    balls
+                ):
+
+                    total_boxes += 1
+
+                    try:
+
+                        rect = (
+                            ball[
+                                "entire"
+                            ][
+                                "rect"
+                            ]
+                        )
+
+                        rect = [
+                            float(v)
+                            for v in rect
+                        ]
+
+                    except Exception:
+
+                        overall["BAD_RECT"] += 1
+
+                        continue
+
+                    if len(rect) != 4:
+
+                        overall["BAD_RECT"] += 1
+
+                        continue
+
+                    xyxy = valid_xyxy(
+                        rect,
+                        W,
+                        H,
+                    )
+
+                    xywh = valid_xywh(
+                        rect,
+                        W,
+                        H,
+                    )
+
+                    # ------------------------------------------------
+                    # CLASSIFICATION
+                    # ------------------------------------------------
+
+                    if xyxy and not xywh:
+
+                        classification = (
+                            "XYXY_ONLY"
+                        )
+
+                    elif xywh and not xyxy:
+
+                        classification = (
+                            "XYWH_ONLY"
+                        )
+
+                    elif xyxy and xywh:
+
+                        classification = (
+                            "BOTH_VALID"
+                        )
+
+                    else:
+
+                        classification = (
+                            "NEITHER_VALID"
+                        )
+
+                    overall[
+                        classification
+                    ] += 1
+
+                    per_case[
+                        case
+                    ][
+                        classification
+                    ] += 1
+
+                    # ------------------------------------------------
+                    # Save examples
+                    # ------------------------------------------------
+
+                    if len(
+                        examples[classification]
+                    ) < SAMPLES_PER_TYPE:
+
+                        examples[
+                            classification
+                        ].append(
+                            {
+                                "case": case,
+                                "image": image_path,
+                                "json": json_path,
+                                "rect": rect,
+                                "W": W,
+                                "H": H,
+                            }
+                        )
 
     # ========================================================
-    # DONE
+    # RESULTS
     # ========================================================
 
     print(
-        "\n" +
-        "=" * 60
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "ANNOTATION FORMAT ANALYSIS"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    print(
+        f"Images scanned : {total_images}"
+    )
+
+    print(
+        f"Boxes scanned  : {total_boxes}"
+    )
+
+    print()
+
+    for key in [
+        "XYXY_ONLY",
+        "XYWH_ONLY",
+        "BOTH_VALID",
+        "NEITHER_VALID",
+        "BAD_RECT",
+        "BAD_JSON",
+        "BAD_IMAGE",
+    ]:
+
+        print(
+            f"{key:20s}: "
+            f"{overall[key]}"
+        )
+
+    # ========================================================
+    # PER CASE
+    # ========================================================
+
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "PER CASE"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    for case in CASES:
+
+        c = per_case[case]
+
+        print(
+            f"\n{case}"
+        )
+
+        print(
+            f"  XYXY only    : "
+            f"{c['XYXY_ONLY']}"
+        )
+
+        print(
+            f"  XYWH only    : "
+            f"{c['XYWH_ONLY']}"
+        )
+
+        print(
+            f"  Both valid   : "
+            f"{c['BOTH_VALID']}"
+        )
+
+        print(
+            f"  Neither      : "
+            f"{c['NEITHER_VALID']}"
+        )
+
+    # ========================================================
+    # PROOF IMAGES
+    # ========================================================
+
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "CREATING VISUAL PROOF"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    for classification, items in examples.items():
+
+        print(
+            f"\n{classification}: "
+            f"{len(items)} examples"
+        )
+
+        for i, item in enumerate(items):
+
+            try:
+
+                image = Image.open(
+                    item["image"]
+                ).convert("RGB")
+
+            except Exception:
+
+                continue
+
+            filename = (
+                f"{item['case']}_"
+                f"{item['image'].stem}_"
+                f"{i}.jpg"
+            )
+
+            output = make_proof_image(
+                image,
+                item["rect"],
+                filename,
+                classification,
+                item["W"],
+                item["H"],
+            )
+
+            print(
+                f"  {output}"
+            )
+
+    # ========================================================
+    # TEXT REPORT
+    # ========================================================
+
+    report = (
+        OUTPUT /
+        "format_report.txt"
+    )
+
+    with open(
+        report,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        f.write(
+            "ANNOTATION FORMAT REPORT\n"
+        )
+
+        f.write(
+            "=" * 60 + "\n\n"
+        )
+
+        f.write(
+            f"Images scanned: "
+            f"{total_images}\n"
+        )
+
+        f.write(
+            f"Boxes scanned: "
+            f"{total_boxes}\n\n"
+        )
+
+        for key, value in overall.items():
+
+            f.write(
+                f"{key}: {value}\n"
+            )
+
+        f.write(
+            "\n\nPER CASE\n"
+        )
+
+        for case in CASES:
+
+            f.write(
+                f"\n{case}\n"
+            )
+
+            for key, value in (
+                per_case[case].items()
+            ):
+
+                f.write(
+                    f"  {key}: {value}\n"
+                )
+
+        f.write(
+            "\n\nEXAMPLES\n"
+        )
+
+        for classification, items in (
+            examples.items()
+        ):
+
+            f.write(
+                f"\n{classification}\n"
+            )
+
+            for item in items:
+
+                f.write(
+                    f"\n"
+                    f"case: {item['case']}\n"
+                    f"image: {item['image']}\n"
+                    f"json: {item['json']}\n"
+                    f"image_size: "
+                    f"{item['W']}x{item['H']}\n"
+                    f"rect: {item['rect']}\n"
+                )
+
+    print(
+        "\n"
+        + "=" * 75
     )
 
     print(
@@ -626,32 +663,17 @@ def main():
     )
 
     print(
-        "=" * 60
+        "=" * 75
     )
 
     print(
-        f"Images visualized: {total}"
-    )
-
-    print(
-        f"\nOutput:"
+        f"\nProof directory:"
         f"\n{OUTPUT}"
     )
 
     print(
-        "\nCompare:"
-    )
-
-    print(
-        f"  {OUTPUT}/XYXY/"
-    )
-
-    print(
-        f"  {OUTPUT}/XYWH/"
-    )
-
-    print(
-        f"  {OUTPUT}/BOTH/"
+        f"\nReport:"
+        f"\n{report}"
     )
 
 
