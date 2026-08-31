@@ -1,0 +1,40 @@
+# Exclude model weights and generated artifacts
+prune weights
+prune runs
+prune examples/runs
+prune temporary
+prune media
+prune notebooks
+prune tests/output
+
+# Exclude binary/large files globally
+global-exclude *.pt
+global-exclude *.onnx
+global-exclude *.jpg
+global-exclude *.png
+global-exclude *.webp
+global-exclude *.mp4
+
+# Re-include packaged sample assets (overrides global-exclude above)
+recursive-include libreyolo/assets *.jpg
+recursive-include libreyolo *.yaml
+recursive-include libreyolo/data *.json
+recursive-include libreyolo/data *.txt
+
+# LibreCLIP shipped data: vendored BPE vocab + ImageNet labels/templates
+recursive-include libreyolo/models/clip *.gz
+recursive-include libreyolo/models/clip/data *.json
+
+# Bundled public-domain Darknet model-definition cfgs (YOLOv2/v3/v4)
+recursive-include libreyolo/models/darknet/cfgs *.cfg
+
+# Bundled MIT YOLOv7 model-definition yaml (MultimediaTechLab/YOLO)
+recursive-include libreyolo/models/yolo7 *.yaml
+
+# Bundled third-party license texts (must ship with the wheel)
+recursive-include libreyolo/models *.md
+recursive-include libreyolo/models NOTICE
+include THIRD_PARTY_NOTICES.txt
+include weights/LICENSE_NOTICE.txt
+include NOTICE
+include licenses/Apache-2.0.txt

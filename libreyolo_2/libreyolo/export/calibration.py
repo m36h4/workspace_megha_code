@@ -1,0 +1,195 @@
+"""INT8 calibration utilities for TensorRT export."""
+
+import logging
+from pathlib import Path
+from typing import Iterator, Tuple, Union
+
+import cv2
+import numpy as np
+
+from libreyolo.data.utils import load_data_config, get_img_files
+
+logger = logging.getLogger(__name__)
+
+ImageSize = Union[int, Tuple[int, int]]
+
+
+def _imgsz_hw(imgsz: ImageSize) -> tuple[int, int]:
+    if isinstance(imgsz, tuple):
+        if len(imgsz) != 2:
+            raise ValueError(f"imgsz must be int or (height, width), got {imgsz}")
+        h, w = int(imgsz[0]), int(imgsz[1])
+    else:
+        h = w = int(imgsz)
+    if h <= 0 or w <= 0:
+        raise ValueError(f"imgsz values must be positive, got {(h, w)}")
+    return h, w
+
+
+class CalibrationDataLoader:
+    """
+    Calibration data provider for INT8 quantization.
+
+    Loads images from a dataset config and provides batches of preprocessed
+    numpy arrays suitable for TensorRT calibration.
+
+    Example::
+
+        calib_loader = CalibrationDataLoader(
+            data="coco8.yaml",
+            imgsz=640,
+            batch=8,
+            fraction=0.5,
+        )
+        for batch in calib_loader:
+            # batch is np.ndarray of shape (B, 3, H, W), dtype float32
+            ...
+    """
+
+    def __init__(
+        self,
+        data: str,
+        imgsz: ImageSize = 640,
+        batch: int = 8,
+        fraction: float = 1.0,
+        samples: int | None = None,
+        preprocess_fn=None,
+        allow_download_scripts: bool = False,
+    ):
+        """
+        Initialize calibration data loader.
+
+        Args:
+            data: Path to data.yaml configuration file or built-in dataset name.
+            imgsz: Input image size as an int or ``(height, width)`` tuple.
+            batch: Batch size for calibration.
+            fraction: Fraction of dataset to use (0.0-1.0). Use smaller values
+                     for faster calibration with slight accuracy tradeoff.
+            samples: Optional hard cap on the number of calibration images,
+                applied after ``fraction``.
+            preprocess_fn: Callable ``(img_rgb_hwc, input_size) -> (chw_float32, ratio)``.
+                Obtained from ``model._get_preprocess_numpy()``.
+            allow_download_scripts: Allow embedded Python in dataset YAML downloads.
+        """
+        if batch < 1:
+            raise ValueError(f"batch must be >= 1, got {batch}")
+        self.imgsz = imgsz
+        self.batch = batch
+        self.fraction = max(0.0, min(1.0, fraction))
+        self.samples = samples
+        self._preprocess_fn = preprocess_fn
+
+        # Load dataset config (handles resolve, download, path resolution)
+        data_config = load_data_config(
+            data,
+            autodownload=True,
+            allow_scripts=allow_download_scripts,
+        )
+
+        # Get train images (preferred for calibration - more diverse) or val
+        root = Path(data_config.get("path", "."))
+
+        # Check for pre-resolved image files (from .txt format datasets)
+        if "train_img_files" in data_config:
+            self.img_files = [Path(f) for f in data_config["train_img_files"]]
+        elif "val_img_files" in data_config:
+            self.img_files = [Path(f) for f in data_config["val_img_files"]]
+        else:
+            # Resolve from directory/file path - prefer train for more diversity
+            train_path = data_config.get("train") or data_config.get("val")
+            if train_path is None:
+                raise ValueError("Dataset config must have 'train' or 'val' key")
+
+            self.img_files = get_img_files(train_path, prefix=str(root))
+
+        if len(self.img_files) == 0:
+            raise ValueError(f"No images found in dataset: {data}")
+
+        total = len(self.img_files)
+        self.num_samples = max(1, int(total * self.fraction))
+        if self.samples is not None:
+            self.num_samples = max(1, min(self.num_samples, int(self.samples)))
+        self.img_files = self.img_files[: self.num_samples]
+        self._num_batches = (self.num_samples + self.batch - 1) // self.batch
+
+    def _preprocess(self, img_path: Path) -> np.ndarray:
+        """Preprocess a single image using the model's ``preprocess_fn``."""
+        img = cv2.imread(str(img_path))
+        if img is None:
+            raise FileNotFoundError(f"Cannot read image: {img_path}")
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        result, _ = self._preprocess_fn(img_rgb, self.imgsz)
+        return result
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        """Yield batches of calibration data as numpy arrays."""
+        batch_data = []
+
+        for img_path in self.img_files:
+            try:
+                img = self._preprocess(img_path)
+                batch_data.append(img)
+            except Exception as e:
+                logger.warning("Skipping %s: %s", img_path, e)
+                continue
+
+            if len(batch_data) == self.batch:
+                yield np.stack(batch_data, axis=0)
+                batch_data = []
+
+        # Pad last batch to full size (required by TensorRT)
+        if batch_data:
+            while len(batch_data) < self.batch:
+                batch_data.append(batch_data[-1].copy())
+            yield np.stack(batch_data, axis=0)
+
+    def __len__(self) -> int:
+        """Return number of calibration batches."""
+        return self._num_batches
+
+    @property
+    def shape(self) -> tuple:
+        """Return shape of a single batch: (batch, channels, height, width)."""
+        h, w = _imgsz_hw(self.imgsz)
+        return (self.batch, 3, h, w)
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Return data type of calibration batches."""
+        return np.float32
+
+
+def get_calibration_dataloader(
+    data: str,
+    imgsz: ImageSize = 640,
+    batch: int = 8,
+    fraction: float = 1.0,
+    preprocess_fn=None,
+    allow_download_scripts: bool = False,
+    samples: int | None = None,
+) -> CalibrationDataLoader:
+    """
+    Factory function for calibration data loader.
+
+    Args:
+        data: Path to data.yaml or built-in dataset name (e.g., "coco8").
+        imgsz: Input image size.
+        batch: Batch size for calibration.
+        fraction: Fraction of dataset to use.
+        preprocess_fn: Callable ``(img_rgb_hwc, input_size) -> (chw_float32, ratio)``.
+        allow_download_scripts: Allow embedded Python in dataset YAML downloads.
+        samples: Optional hard cap on the number of calibration images.
+
+    Returns:
+        CalibrationDataLoader instance.
+    """
+    return CalibrationDataLoader(
+        data,
+        imgsz=imgsz,
+        batch=batch,
+        fraction=fraction,
+        samples=samples,
+        preprocess_fn=preprocess_fn,
+        allow_download_scripts=allow_download_scripts,
+    )

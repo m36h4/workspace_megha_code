@@ -1,0 +1,511 @@
+"""TensorRT export implementation."""
+
+import hashlib
+import json
+import logging
+import warnings
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+import numpy as np
+import torch
+
+from .calibration import CalibrationDataLoader
+from .config import TensorRTExportConfig
+
+logger = logging.getLogger(__name__)
+
+
+def check_tensorrt_available() -> None:
+    """Check if TensorRT is available and raise helpful error if not."""
+    try:
+        import tensorrt as trt
+
+        _ = trt.__version__
+    except ImportError:
+        raise ImportError(
+            "TensorRT export requires the 'tensorrt' package.\n\n"
+            "Installation options:\n"
+            "  1. pip install tensorrt  (requires NVIDIA GPU + CUDA)\n"
+            "  2. pip install nvidia-tensorrt  (alternative package name)\n\n"
+            "Requirements:\n"
+            "  - NVIDIA GPU with compute capability >= 5.0\n"
+            "  - CUDA toolkit installed\n"
+            "  - cuDNN installed\n\n"
+            "For Jetson devices, TensorRT is pre-installed with JetPack."
+        )
+
+
+def _create_calibrator_class():
+    """Create calibrator class that inherits from TensorRT base.
+
+    The class is created at runtime so that importing this module does not
+    require TensorRT to be installed.
+    """
+    try:
+        import tensorrt as trt
+
+        class _TensorRTCalibratorImpl(trt.IInt8EntropyCalibrator2):
+            """INT8 entropy calibrator for TensorRT engine builds."""
+
+            def __init__(self, data_loader, cache_file="calibration.cache"):
+                super().__init__()
+                self.data_loader = data_loader
+                self.cache_file = Path(cache_file)
+                self.batch_iter = None
+                self._device_input = None
+                self._batch_size = data_loader.batch
+                self._batch_idx = 0
+
+            def get_batch_size(self):
+                return self._batch_size
+
+            def get_batch(self, names):
+                if self.batch_iter is None:
+                    self.batch_iter = iter(self.data_loader)
+
+                try:
+                    batch = next(self.batch_iter)
+                    self._batch_idx += 1
+                    total = len(self.data_loader)
+                    logger.info("Calibrating: batch %d/%d", self._batch_idx, total)
+                    device_ptr = self._ensure_cuda_memory(batch)
+                    return [device_ptr]
+                except StopIteration:
+                    return None
+
+            def _ensure_cuda_memory(self, batch):
+                batch = np.ascontiguousarray(batch, dtype=np.float32)
+
+                # Try cuda-python/cuda-bindings first (newer, better maintained)
+                try:
+                    from cuda.bindings import runtime as cudart
+
+                    if self._device_input is None:
+                        err, self._device_input = cudart.cudaMalloc(batch.nbytes)
+                        if err != cudart.cudaError_t.cudaSuccess:
+                            raise RuntimeError(f"cudaMalloc failed: {err}")
+                    (err,) = cudart.cudaMemcpy(
+                        self._device_input,
+                        batch.ctypes.data,
+                        batch.nbytes,
+                        cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                    )
+                    if err != cudart.cudaError_t.cudaSuccess:
+                        raise RuntimeError(f"cudaMemcpy failed: {err}")
+                    return int(self._device_input)
+                except ImportError:
+                    pass
+
+                # Fall back to pycuda
+                try:
+                    import pycuda.driver as cuda
+                    import pycuda.autoinit  # noqa: F401
+
+                    if self._device_input is None:
+                        self._device_input = cuda.mem_alloc(batch.nbytes)
+
+                    cuda.memcpy_htod(self._device_input, batch)
+                    return int(self._device_input)
+                except ImportError:
+                    raise ImportError(
+                        "INT8 calibration requires cuda-python or pycuda.\n"
+                        "Install with: pip install cuda-python\n"
+                        "Or: pip install pycuda (requires python3-dev)"
+                    )
+
+            def __del__(self):
+                if self._device_input is not None:
+                    try:
+                        from cuda.bindings import runtime as cudart
+
+                        cudart.cudaFree(self._device_input)
+                    except (ImportError, Exception):
+                        pass  # pycuda frees via its own DeviceAllocation.__del__
+
+            def read_calibration_cache(self):
+                if self.cache_file.exists():
+                    logger.info("Loading calibration cache: %s", self.cache_file)
+                    with open(self.cache_file, "rb") as f:
+                        return f.read()
+                return None
+
+            def write_calibration_cache(self, cache):
+                logger.info("Saving calibration cache: %s", self.cache_file)
+                with open(self.cache_file, "wb") as f:
+                    f.write(cache)
+
+        return _TensorRTCalibratorImpl
+
+    except ImportError:
+        raise ImportError(
+            "INT8 calibration requires TensorRT.\nInstall with: pip install tensorrt"
+        )
+
+
+def get_calibrator_class():
+    """Get the appropriate calibrator class based on TensorRT availability."""
+    return _create_calibrator_class()
+
+
+def export_tensorrt(
+    onnx_path: str,
+    output_path: str,
+    *,
+    half: bool = True,
+    int8: bool = False,
+    workspace: float = 4.0,
+    calibration_data: Optional[CalibrationDataLoader] = None,
+    dynamic: bool = False,
+    verbose: bool = False,
+    min_batch: int = 1,
+    opt_batch: int = 1,
+    max_batch: int = 8,
+    hardware_compatibility: str = "none",
+    device: int = 0,
+    config: Optional[Union[str, Path, dict, TensorRTExportConfig]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Export ONNX model to TensorRT engine.
+
+    The engine is optimized for the GPU it's built on. By default, engines are NOT
+    portable between different GPU architectures (e.g., an engine built
+    on RTX 4090 won't work on RTX 3080). Use hardware_compatibility to
+    enable portability at the cost of some performance.
+
+    Args:
+        onnx_path: Path to ONNX model file.
+        output_path: Output path for .engine file.
+        half: Enable FP16 precision (default: True). Provides ~2x speedup
+              on most GPUs with minimal accuracy loss.
+        int8: Enable INT8 precision (default: False). Requires calibration_data.
+              Provides additional speedup but may impact accuracy.
+        workspace: GPU workspace size in GiB for kernel optimization (default: 4.0).
+                  Larger values may find faster kernels but use more GPU memory
+                  during build. Does not affect inference memory usage.
+        calibration_data: CalibrationDataLoader for INT8 quantization.
+                         Required when int8=True.
+        dynamic: Enable dynamic batch size (default: False). When True, the
+                engine supports batch sizes from min_batch to max_batch.
+        verbose: Enable verbose TensorRT logging (default: False).
+        min_batch: Minimum batch size for dynamic batching (default: 1).
+        opt_batch: Optimal batch size for dynamic batching (default: 1).
+                  TensorRT optimizes kernels for this batch size.
+        max_batch: Maximum batch size for dynamic batching (default: 8).
+        hardware_compatibility: Hardware compatibility level (default: "none").
+            - "none": Optimize for current GPU only (fastest, not portable)
+            - "ampere_plus": Works on Ampere (RTX 30xx, A100) and newer GPUs
+            - "same_compute_capability": Works on GPUs with same SM version
+        device: GPU device ID for multi-GPU systems (default: 0).
+        config: Optional TensorRTExportConfig or path to YAML config file.
+               If provided, overrides individual parameters.
+        metadata: Optional dict of model metadata to write as a JSON sidecar
+                 file alongside the engine (e.g. model_family, nb_classes, names).
+
+    Returns:
+        Path to exported .engine file.
+
+    Raises:
+        ImportError: If TensorRT is not installed.
+        ValueError: If int8=True but calibration_data is not provided.
+        RuntimeError: If engine building fails.
+
+    Example::
+
+        # FP16 export (recommended for most use cases)
+        export_tensorrt("model.onnx", "model.engine", half=True)
+
+        # INT8 export with calibration
+        from libreyolo.export.calibration import get_calibration_dataloader
+        calib = get_calibration_dataloader("coco8.yaml", imgsz=640)
+        export_tensorrt("model.onnx", "model_int8.engine", int8=True,
+                       calibration_data=calib)
+
+        # Export with config file
+        export_tensorrt("model.onnx", "model.engine",
+                       config="tensorrt_default.yaml")
+    """
+    if config is not None:
+        from .config import load_export_config
+
+        cfg = load_export_config(config)
+        half = cfg.half
+        int8 = cfg.int8
+        workspace = cfg.workspace
+        verbose = cfg.verbose
+        hardware_compatibility = cfg.hardware_compatibility
+        device = cfg.device
+        if cfg.dynamic.enabled:
+            dynamic = True
+            min_batch = cfg.dynamic.min_batch
+            opt_batch = cfg.dynamic.opt_batch
+            max_batch = cfg.dynamic.max_batch
+        if cfg.int8:
+            # int8_calibration (dataset/fraction/cache) is parsed and validated
+            # by TensorRTExportConfig but not consumed here: calibration comes
+            # from the pre-built ``calibration_data`` loader (the export()
+            # data=/fraction= arguments). Warn rather than silently drop it.
+            warnings.warn(
+                "TensorRTExportConfig.int8_calibration "
+                "(dataset/fraction/cache) is currently ignored: INT8 "
+                "calibration is driven by the export() data=/fraction= "
+                "arguments (passed here as calibration_data). Set those to "
+                "control INT8 calibration."
+            )
+
+    if metadata is not None:
+        metadata = dict(metadata)
+        if dynamic:
+            metadata.update(
+                {
+                    "trt_min_batch": int(min_batch),
+                    "trt_opt_batch": int(opt_batch),
+                    "trt_max_batch": int(max_batch),
+                }
+            )
+
+    check_tensorrt_available()
+    import tensorrt as trt
+
+    if device != 0:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(device)
+            logger.info(
+                "Using GPU device: %d (%s)", device, torch.cuda.get_device_name(device)
+            )
+
+    if int8 and calibration_data is None:
+        raise ValueError(
+            "INT8 quantization requires calibration data.\n"
+            "Provide calibration_data parameter or use data='coco8.yaml' "
+            "in the export() call."
+        )
+
+    if half and int8:
+        warnings.warn(
+            "Both half=True and int8=True specified. Using INT8 precision "
+            "(INT8 includes FP16 fallback for unsupported layers)."
+        )
+
+    onnx_path = Path(onnx_path)
+    if not onnx_path.exists():
+        raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
+
+    log_level = trt.Logger.VERBOSE if verbose else trt.Logger.WARNING
+    trt_logger = trt.Logger(log_level)
+
+    builder = trt.Builder(trt_logger)
+    # Explicit batch mode (required for modern TensorRT)
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(network_flags)
+    parser = trt.OnnxParser(network, trt_logger)
+
+    logger.info("Parsing ONNX model: %s", onnx_path)
+    with open(onnx_path, "rb") as f:
+        onnx_data = f.read()
+
+    if not parser.parse(onnx_data):
+        error_msgs = []
+        for i in range(parser.num_errors):
+            error_msgs.append(str(parser.get_error(i)))
+        raise RuntimeError("Failed to parse ONNX model:\n" + "\n".join(error_msgs))
+
+    logger.info(
+        "Network: %d inputs, %d outputs, %d layers",
+        network.num_inputs,
+        network.num_outputs,
+        network.num_layers,
+    )
+
+    builder_config = builder.create_builder_config()
+
+    workspace_bytes = int(workspace * (1 << 30))  # GiB to bytes
+    builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+    logger.info("Workspace: %s GiB", workspace)
+
+    if hardware_compatibility != "none":
+        try:
+            compat_level = {
+                "ampere_plus": trt.HardwareCompatibilityLevel.AMPERE_PLUS,
+                "same_compute_capability": trt.HardwareCompatibilityLevel.NONE,  # TRT 8.x fallback
+            }.get(hardware_compatibility)
+
+            if compat_level is not None:
+                builder_config.hardware_compatibility_level = compat_level
+                if (
+                    hardware_compatibility == "same_compute_capability"
+                    and compat_level == trt.HardwareCompatibilityLevel.NONE
+                ):
+                    # This TRT build has no real "same compute capability" level;
+                    # it falls back to NONE, which yields a current-GPU-only
+                    # engine. Do not claim portability was applied.
+                    warnings.warn(
+                        "hardware_compatibility='same_compute_capability' is not "
+                        "supported on this TensorRT build and maps to NONE: the "
+                        "engine is optimized for the current GPU only and is not "
+                        "portable to other GPUs of the same compute capability."
+                    )
+                else:
+                    logger.info(
+                        "Hardware compatibility: %s", hardware_compatibility
+                    )
+            else:
+                warnings.warn(
+                    f"Unknown hardware_compatibility '{hardware_compatibility}'. "
+                    f"Using default (none)."
+                )
+        except AttributeError:
+            warnings.warn(
+                "TensorRT version does not support hardware_compatibility_level. "
+                "Engine will only work on current GPU architecture."
+            )
+
+    # Precision
+    precision_str = "FP32"
+    # Canonical precision actually realized by the build (may differ from the
+    # requested precision when the GPU lacks fast FP16/INT8). Threaded into the
+    # sidecar metadata so the artifact never claims a precision it isn't.
+    actual_precision = "fp32"
+
+    if half or int8:
+        if builder.platform_has_fast_fp16:
+            builder_config.set_flag(trt.BuilderFlag.FP16)
+            precision_str = "FP16"
+            actual_precision = "fp16"
+            # ViT backbones (DINOv2/v3) overflow in FP16 -> NaN. The FP16 builder flag above is
+            # enabled for both half and int8 builds (INT8 still runs FP16-precision layers), so
+            # pin the ViT backbone whenever FP16 is active, not only for half. Detect a ViT
+            # backbone (LayerNorm/Erf under model/backbone) and pin its float compute layers to
+            # FP32 (mixed precision); no-op for CNN backbones.
+            try:
+                import onnx as _onnx
+                _vit = any(
+                    n.op_type in ("LayerNormalization", "Erf")
+                    and "backbone" in (n.name or "")
+                    for n in _onnx.load(onnx_path).graph.node
+                )
+            except Exception:
+                _vit = False
+            if _vit:
+                builder_config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+                _npin = 0
+                for _i in range(network.num_layers):
+                    _lyr = network.get_layer(_i)
+                    if "backbone" not in (_lyr.name or "") or _lyr.type == trt.LayerType.SHAPE:
+                        continue
+                    try:
+                        _outs = [_lyr.get_output(_j) for _j in range(_lyr.num_outputs)]
+                        if any(o is None or o.dtype not in (trt.float32, trt.float16) for o in _outs):
+                            continue
+                        _lyr.precision = trt.float32
+                        for _j in range(_lyr.num_outputs):
+                            _lyr.set_output_type(_j, trt.float32)
+                        _npin += 1
+                    except Exception:
+                        continue
+                if _npin > 0:
+                    precision_str = "FP16 (FP32 ViT backbone)"
+                    logger.info("ViT backbone: pinned %d float layers to FP32", _npin)
+                else:
+                    logger.warning(
+                        "ViT backbone detected in ONNX but no matching TRT layers found; "
+                        "FP32 pinning skipped"
+                    )
+        else:
+            warnings.warn("GPU does not support fast FP16. Falling back to FP32.")
+
+    if int8:
+        if builder.platform_has_fast_int8:
+            builder_config.set_flag(trt.BuilderFlag.INT8)
+            precision_str = "INT8"
+            actual_precision = "int8"
+
+            CalibratorClass = get_calibrator_class()
+            # Key the calibration cache on model identity (ONNX content hash) so
+            # calibration scales for one model are never reused for another that
+            # happens to export to the same output path.
+            model_hash = hashlib.sha1(onnx_data).hexdigest()[:12]
+            cache_out = Path(output_path)
+            cache_file = cache_out.with_name(f"{cache_out.stem}.{model_hash}.cache")
+            calibrator = CalibratorClass(
+                calibration_data,
+                cache_file=str(cache_file),
+            )
+            builder_config.int8_calibrator = calibrator
+            logger.info(
+                "INT8 calibration: %d batches, batch size %d",
+                len(calibration_data),
+                calibration_data.batch,
+            )
+        else:
+            warnings.warn("GPU does not support fast INT8. Falling back to FP16.")
+
+    logger.info("Precision: %s", precision_str)
+
+    # Dynamic shapes (only if ONNX has dynamic batch dimension)
+    input_tensor = network.get_input(0)
+    input_shape = input_tensor.shape
+    has_dynamic_batch = input_shape[0] == -1  # -1 means dynamic in ONNX/TRT
+
+    if dynamic and has_dynamic_batch:
+        profile = builder.create_optimization_profile()
+
+        for i in range(network.num_inputs):
+            input_tensor = network.get_input(i)
+            input_name = input_tensor.name
+            input_shape = input_tensor.shape
+
+            _, c, h, w = input_shape  # (batch, channels, height, width)
+
+            min_shape = (min_batch, c, h, w)
+            opt_shape = (opt_batch, c, h, w)
+            max_shape = (max_batch, c, h, w)
+
+            profile.set_shape(input_name, min_shape, opt_shape, max_shape)
+            logger.info(
+                "Dynamic input '%s': min=%s, opt=%s, max=%s",
+                input_name,
+                min_shape,
+                opt_shape,
+                max_shape,
+            )
+
+        builder_config.add_optimization_profile(profile)
+    elif dynamic and not has_dynamic_batch:
+        logger.info(
+            "Note: ONNX has static batch size (%s), using static optimization",
+            input_shape[0],
+        )
+
+    logger.info("Building TensorRT engine... (this may take several minutes)")
+
+    serialized_engine = builder.build_serialized_network(network, builder_config)
+
+    if serialized_engine is None:
+        raise RuntimeError(
+            "TensorRT engine build failed. Common causes:\n"
+            "  - Unsupported ONNX operations\n"
+            "  - Insufficient GPU memory\n"
+            "  - CUDA/cuDNN version mismatch\n"
+            "Try running with verbose=True for detailed error messages."
+        )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "wb") as f:
+        f.write(serialized_engine)
+
+    if metadata is not None:
+        # Reflect the precision actually realized by the build (e.g. fp16 after
+        # an INT8→FP16 fallback) instead of the pre-build request.
+        metadata["precision"] = actual_precision
+        sidecar_path = Path(str(output_path) + ".json")
+        with open(sidecar_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info("Metadata sidecar: %s", sidecar_path)
+
+    engine_size_mb = output_path.stat().st_size / (1024 * 1024)
+    logger.info("Engine saved: %s (%.1f MB)", output_path, engine_size_mb)
+
+    return str(output_path)

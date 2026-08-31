@@ -1,0 +1,497 @@
+"""LibreDFINE — BaseModel wrapper for the D-FINE native detection family."""
+
+from __future__ import annotations
+
+import logging
+import re
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+from libreyolo.training.ddp_spawn import ddp_aware
+
+from ...training.callbacks import TrainCallbacks
+from ...tasks import normalize_task
+from ...utils.image_loader import ImageInput
+from ...validation.preprocessors import DFINEValPreprocessor
+from ..base import BaseModel
+from .nn import LibreDFINEModel
+from ...postprocess.dfine import postprocess, postprocess_seg
+from .utils import preprocess_image, unwrap_dfine_checkpoint
+
+logger = logging.getLogger(__name__)
+
+
+class LibreDFINE(BaseModel):
+    """LibreYOLO wrapper for D-FINE.
+
+    Loads upstream ``dfine_{n,s,m,l,x}_coco.pth`` checkpoints and supports
+    inference, fine-tuning (via ``DFINETrainer``), validation, and export
+    (ONNX / TensorRT / OpenVINO).
+
+    ``task='segment'`` adds the D-FINE-seg mask head.
+    COCO-pretrained ``LibreDFINE{n,s,m,l,x}-seg.pt`` weights auto-download from
+    the LibreYOLO Hugging Face org (converted from ArgoSA/D-FINE-seg,
+    Apache-2.0). Fine-tuning from detect weights instead requires an explicit
+    transfer (``allow_detect_to_segment_transfer=True``, which the
+    ``libreyolo train ... task=segment`` CLI passes automatically).
+    """
+
+    FAMILY = "dfine"
+    FILENAME_PREFIX = "LibreDFINE"
+    INPUT_SIZES = {"n": 640, "s": 640, "m": 640, "l": 640, "x": 640}
+    SUPPORTED_TASKS = ("detect", "segment")
+    # Forward is pure tensor work with no host sync, verified to capture and
+    # replay bit-identically (tests/unit/test_cuda_graph_families.py).
+    SUPPORTS_CUDA_GRAPH = True
+    DEFAULT_TASK = "detect"
+    TASK_INPUT_SIZES = {
+        "detect": INPUT_SIZES,
+        "segment": INPUT_SIZES,
+    }
+    val_preprocessor_class = DFINEValPreprocessor
+    TTA_FIXED_SIZE = True  # resizes to a fixed square; multi-scale TTA is a no-op
+    # The eval forward (HGNetv2 backbone + hybrid encoder + FDR decoder) is
+    # pure tensor work at a fixed eval_spatial_size: anchors are regenerated
+    # lazily but settle during capture warmup, and top-k selection has a
+    # static output shape. Captures and replays bit-identically
+    # (tests/unit/test_cuda_graph_detr_families.py).
+    SUPPORTS_CUDA_GRAPH = True
+
+    @classmethod
+    def can_load(cls, weights_dict: dict) -> bool:
+        # D-FINE-unique decoder key prefix.  ``pre_bbox_head`` is present in
+        # D-FINE but absent from RT-DETR (which otherwise shares
+        # ``dec_bbox_head``, ``denoising_class_embed``, and ``enc_bbox_head``).
+        #
+        # Dome-DETR derives from D-FINE and carries ``pre_bbox_head`` too, so
+        # reject its DeFE-bearing checkpoints explicitly. Registry order
+        # already puts LibreDOMEDETR first; this makes the rejection hold even
+        # when ``can_load`` is consulted on its own.
+        if any(k.startswith("encoder.DeFE.") for k in weights_dict):
+            return False
+        return any("decoder.pre_bbox_head." in k for k in weights_dict)
+
+    @classmethod
+    def detect_size_from_filename(cls, filename: str) -> Optional[str]:
+        detected = super().detect_size_from_filename(filename)
+        if detected is not None:
+            return detected
+        # Covers upstream D-FINE (dfine_hgnetv2_n_coco.pth) and D-FINE-seg
+        # (dfine_seg_n_coco.pt) release filenames.
+        m = re.search(
+            r"dfine(?:_hgnetv2)?(?:_seg)?_([nsmlx])(?:_|\.|$)", filename.lower()
+        )
+        if m:
+            return m.group(1)
+        return None
+
+    @classmethod
+    def detect_size(cls, weights_dict: dict) -> Optional[str]:
+        """Infer size from distinctive shapes.
+
+        Strategy: encoder hidden_dim (via ``encoder.lateral_convs.0.conv.weight``
+        in-channels) separates N (128) / X (384) / the rest (256). Among the
+        256-group, encoder input_proj[0] in-channels (backbone stage out
+        channels) distinguishes S (256, B0) / M (384, B2) / L (512, B4).
+        """
+        enc_hidden_key = "encoder.lateral_convs.0.conv.weight"
+        if enc_hidden_key not in weights_dict:
+            return None
+        enc_hidden = int(weights_dict[enc_hidden_key].shape[1])
+
+        enc_levels = sum(
+            1
+            for k in weights_dict
+            if k.startswith("encoder.input_proj.") and "conv.weight" in k
+        )
+
+        if enc_hidden == 128 and enc_levels == 2:
+            return "n"
+        if enc_hidden == 384 and enc_levels == 3:
+            return "x"
+        if enc_hidden == 256 and enc_levels == 3:
+            enc0_key = "encoder.input_proj.0.conv.weight"
+            if enc0_key in weights_dict:
+                enc0_in = int(weights_dict[enc0_key].shape[1])
+                return {256: "s", 384: "m", 512: "l"}.get(enc0_in)
+        return None
+
+    @classmethod
+    def detect_nb_classes(cls, weights_dict: dict) -> Optional[int]:
+        key = "decoder.dec_score_head.0.bias"
+        if key in weights_dict:
+            return int(weights_dict[key].shape[0])
+        return None
+
+    @classmethod
+    def detect_checkpoint_task(cls, weights_dict: dict) -> Optional[str]:
+        if any(
+            k.startswith("decoder.mask_decoder.") or k.startswith("decoder.mask_head.")
+            for k in weights_dict
+        ):
+            return "segment"
+        return None
+
+    # -------------------------------------------------------------------------
+    # Lifecycle
+    # -------------------------------------------------------------------------
+
+    def __init__(
+        self,
+        model_path,
+        size: str,
+        nb_classes: int = 80,
+        device: str = "auto",
+        task: str | None = None,
+        allow_detect_to_segment_transfer: bool = False,
+        **kwargs,
+    ):
+        # Must be set before super().__init__ — weight loading (and its task
+        # validation hook) runs inside the base constructor.
+        self._allow_detect_to_segment_transfer = bool(allow_detect_to_segment_transfer)
+        if isinstance(model_path, dict):
+            model_path = unwrap_dfine_checkpoint(model_path)
+        super().__init__(
+            model_path=model_path,
+            size=size,
+            nb_classes=nb_classes,
+            device=device,
+            task=task,
+            **kwargs,
+        )
+        if isinstance(model_path, str):
+            self._load_weights(model_path)
+
+    @property
+    def _is_segmentation(self) -> bool:
+        # Adapter flag derived from the canonical task state; shared surfaces
+        # (tiled predict, export naming) dispatch mask handling on it.
+        return self.task == "segment"
+
+    def _init_model(self) -> nn.Module:
+        return LibreDFINEModel(
+            config=self.size,
+            nb_classes=self.nb_classes,
+            eval_spatial_size=(self.input_size, self.input_size),
+            enable_mask_head=self.task == "segment",
+            train_from_scratch=self._is_scratch_build(),
+        )
+
+    def _get_available_layers(self) -> Dict[str, nn.Module]:
+        layers = {
+            "backbone": self.model.backbone,
+            "backbone_stem": self.model.backbone.stem,
+            "encoder": self.model.encoder,
+            "encoder_input_proj": self.model.encoder.input_proj,
+            "encoder_fpn": self.model.encoder.fpn_blocks,
+            "encoder_pan": self.model.encoder.pan_blocks,
+            "decoder": self.model.decoder,
+            "decoder_input_proj": self.model.decoder.input_proj,
+            "dec_bbox_head": self.model.decoder.dec_bbox_head,
+            "dec_score_head": self.model.decoder.dec_score_head,
+        }
+        if self.task == "segment":
+            layers["mask_decoder"] = self.model.decoder.mask_decoder
+            layers["mask_head"] = self.model.decoder.mask_head
+        return layers
+
+    @staticmethod
+    def _get_preprocess_numpy():
+        from .utils import preprocess_numpy
+
+        return preprocess_numpy
+
+    def _preprocess(
+        self,
+        image: ImageInput,
+        color_format: str = "auto",
+        input_size: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, Any, Tuple[int, int], float]:
+        effective_size = input_size if input_size is not None else self.input_size
+        return preprocess_image(
+            image,
+            input_size=effective_size,
+            color_format=color_format,
+        )
+
+    def _forward(self, input_tensor: torch.Tensor) -> Any:
+        return self.model(input_tensor)
+
+    def _postprocess(
+        self,
+        output: Any,
+        conf_thres: float,
+        iou_thres: float,
+        original_size: Tuple[int, int],
+        max_det: int = 300,
+        **kwargs,
+    ) -> Dict:
+        if self.task == "segment":
+            return postprocess_seg(
+                output,
+                conf_thres=conf_thres,
+                iou_thres=iou_thres,
+                original_size=original_size,
+                max_det=max_det,
+                # Route the mask upsample through the model input resolution so
+                # PyTorch masks match the exported-backend two-step resize path.
+                input_size=kwargs.get("input_size") or self.input_size,
+            )
+        return postprocess(
+            output,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            original_size=original_size,
+            max_det=max_det,
+        )
+
+    def _strict_loading(self) -> bool:
+        # D-FINE checkpoints carry buffers (anchors, valid_mask) that are
+        # regenerated at forward time from eval_spatial_size. Tolerate drift.
+        return False
+
+    def _validate_loaded_state_dict_for_task(
+        self,
+        state_dict: dict,
+        checkpoint: dict | None = None,
+    ) -> None:
+        detected_task = self.detect_checkpoint_task(state_dict)
+        if detected_task == "segment" and self.task != "segment":
+            raise RuntimeError(
+                "D-FINE segmentation checkpoints must be loaded with task='segment' "
+                "or a '-seg' filename suffix."
+            )
+        if self.task == "segment" and detected_task is None:
+            # Detect weights carry no mask head; predicting with a randomly
+            # initialized one would silently return garbage masks.
+            if not getattr(self, "_allow_detect_to_segment_transfer", False):
+                raise RuntimeError(
+                    "This D-FINE checkpoint has no mask head (detect weights), but "
+                    "the model was initialized for task='segment'. Detect-to-segment "
+                    "initialization is only supported as an explicit training "
+                    "transfer: pass allow_detect_to_segment_transfer=True to "
+                    "LibreDFINE (the `libreyolo train ... task=segment` CLI does "
+                    "this for you), then train before predicting."
+                )
+            logger.info(
+                "Initializing D-FINE segment model from detect weights: the mask "
+                "head is randomly initialized and requires training."
+            )
+
+    @ddp_aware()
+    def train(
+        self,
+        data: str,
+        *,
+        epochs: int = 132,
+        batch: int = 16,
+        imgsz: int = 640,
+        lr0: float = 2e-4,
+        device: str = "",
+        workers: int = 4,
+        seed: int = 0,
+        project: str = "runs/train",
+        name: str = "dfine_exp",
+        exist_ok: bool = False,
+        resume: bool = False,
+        amp: bool = False,
+        patience: int = 50,
+        callbacks: TrainCallbacks = None,
+        loggers=None,
+        **kwargs,
+    ) -> dict:
+        """Fine-tune or train D-FINE on a YOLO-format dataset config.
+
+        For v1 inference-only usage, just don't call this. To fine-tune from
+        upstream weights, pass ``data="coco128.yaml"`` (or your own data yaml).
+
+        Args:
+            data: Path to the dataset YAML file.
+            epochs: Number of epochs to train.
+            batch: Batch size.
+            imgsz: Input image size.
+            lr0: Initial learning rate.
+            device: Device to train on ('' = auto-detect).
+            workers: Number of dataloader workers.
+            seed: Random seed for reproducibility.
+            project: Root directory for training runs.
+            name: Experiment name.
+            exist_ok: If True, overwrite existing experiment directory.
+            resume: If True, resume training from the loaded checkpoint.
+            amp: Enable automatic mixed precision training.
+            patience: Early stopping patience.
+            callbacks: Optional training callback or iterable of callbacks.
+            loggers: Optional built-in experiment loggers: a registered name,
+                a configured logger instance, or an iterable mixing both.
+        """
+        from libreyolo.data import load_data_config
+
+        from .trainer import DFINETrainer
+
+        try:
+            data_config = load_data_config(data, autodownload=True)
+            data = data_config.get("yaml_file", data)
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to load dataset config '{data}': {e}")
+
+        yaml_nc = data_config.get("nc")
+        yaml_names = data_config.get("names")
+        if yaml_nc is not None and yaml_nc != self.nb_classes:
+            self._rebuild_for_new_classes(yaml_nc)
+        if yaml_names is not None:
+            if isinstance(yaml_names, list):
+                yaml_names = {i: n for i, n in enumerate(yaml_names)}
+            self.names = self._sanitize_names(yaml_names, self.nb_classes)
+
+        if seed >= 0:
+            import random
+
+            import numpy as np
+
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if str(device).lower() not in ("cpu", "mps") and torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+        trainer = DFINETrainer(
+            model=self.model,
+            wrapper_model=self,
+            size=self.size,
+            num_classes=self.nb_classes,
+            data=data,
+            epochs=epochs,
+            batch=batch,
+            imgsz=imgsz,
+            lr0=lr0,
+            device=device if device else "auto",
+            workers=workers,
+            seed=seed,
+            project=project,
+            name=name,
+            exist_ok=exist_ok,
+            resume=resume,
+            amp=amp,
+            patience=patience,
+            callbacks=callbacks,
+            loggers=loggers,
+            **kwargs,
+        )
+
+        if resume:
+            if not self.model_path:
+                raise ValueError(
+                    "resume=True requires a checkpoint. Load one first: "
+                    "model = LibreDFINE('path/to/last.pt'); model.train(data=..., resume=True)"
+                )
+            trainer.setup()
+            trainer.resume(str(self.model_path))
+            return trainer.train()
+
+        results = trainer.train()
+
+        best_ckpt = results.get("best_checkpoint")
+        if best_ckpt and Path(best_ckpt).exists():
+            self.model_path = best_ckpt
+            self._load_weights(best_ckpt)
+
+        # The trainer may have forced a different device than the wrapper's
+        # (e.g., MPS-fallback to CPU). Restore the model to the wrapper's
+        # device so subsequent ``model.val()`` / ``model.predict()`` calls
+        # don't hit input/weight device mismatches.
+        self.model.to(self.device)
+
+        return results
+
+    def _load_weights(self, model_path: str):
+        model_path = self._resolve_weights_path(model_path)
+        path = Path(model_path)
+        download_error = None
+        if not path.exists():
+            from ...utils.download import download_weights
+
+            try:
+                download_weights(model_path, self.size)
+            except Exception as exc:
+                download_error = exc
+        if not path.exists():
+            if download_error is not None:
+                raise FileNotFoundError(
+                    f"D-FINE weights file not found: {model_path}\n"
+                    f"Auto-download failed: {download_error}"
+                ) from download_error
+            raise FileNotFoundError(f"D-FINE weights file not found: {model_path}")
+
+        try:
+            loaded = torch.load(model_path, map_location="cpu", weights_only=False)
+            state_dict = unwrap_dfine_checkpoint(loaded)
+            state_dict = self._strip_ddp_prefix(dict(state_dict))
+            self._validate_loaded_state_dict_for_task(
+                state_dict, loaded if isinstance(loaded, dict) else None
+            )
+
+            if isinstance(loaded, dict):
+                ckpt_family = loaded.get("model_family", "")
+                own_family = self._get_model_name()
+                if ckpt_family and ckpt_family != own_family:
+                    raise RuntimeError(
+                        f"Checkpoint was trained with model_family='{ckpt_family}' "
+                        f"but is being loaded into '{own_family}'."
+                    )
+                ckpt_task = loaded.get("task")
+                if ckpt_task is not None:
+                    normalized_ckpt_task = normalize_task(ckpt_task)
+                    allowed = normalized_ckpt_task == self.task or (
+                        normalized_ckpt_task == "detect"
+                        and self.task == "segment"
+                        and self._allow_detect_to_segment_transfer
+                    )
+                    if not allowed:
+                        raise RuntimeError(
+                            f"Checkpoint was trained for task='{normalized_ckpt_task}' "
+                            f"but this model was initialized for task='{self.task}'. "
+                            "Pass the matching task."
+                        )
+                ckpt_nc = loaded.get("nc")
+                if ckpt_nc is not None and ckpt_nc != self.nb_classes:
+                    self._rebuild_for_new_classes(int(ckpt_nc))
+                ckpt_names = loaded.get("names")
+                effective_nc = int(ckpt_nc) if ckpt_nc is not None else self.nb_classes
+                if ckpt_names is not None:
+                    self.names = self._sanitize_names(ckpt_names, effective_nc)
+
+            # Replay LoRA injection for adapter checkpoints. A model trained
+            # with lora=True saves its transformer Linears under peft keys
+            # (``.base_layer.``/``lora_A``/``lora_B``); rebuild the adapted
+            # graph before loading so those keys line up.
+            from ...training.lora import (
+                apply_lora_to_detr,
+                module_has_lora,
+                state_dict_has_lora,
+            )
+
+            if state_dict_has_lora(state_dict) and not module_has_lora(self.model):
+                apply_lora_to_detr(self.model)
+
+            missing, unexpected = self.model.load_state_dict(
+                state_dict, strict=self._strict_loading()
+            )
+            # Loudly surface unexpected keys during bring-up — silent drift here
+            # has historically masked whole-module misalignment.
+            if unexpected:
+                raise RuntimeError(
+                    f"Unexpected keys when loading D-FINE weights: {sorted(unexpected)[:10]}"
+                    + (
+                        f" (+{len(unexpected) - 10} more)"
+                        if len(unexpected) > 10
+                        else ""
+                    )
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load D-FINE weights from {model_path}: {e}"
+            ) from e

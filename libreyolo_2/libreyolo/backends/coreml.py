@@ -1,0 +1,374 @@
+"""CoreML inference backend for LibreYOLO. macOS only.
+
+Loads .mlpackage models produced by libreyolo.export.coreml and runs inference
+via coremltools.models.MLModel. Mirrors OnnxBackend's public surface so the
+rest of LibreYOLO (Results, drawing, etc.) sees the same interface.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+from PIL import Image
+
+from ..tasks import normalize_supported_tasks, normalize_task, resolve_task
+from ..utils.general import COCO_CLASSES
+from ..utils.image_loader import ImageLoader
+from ..utils.serialization import warn_on_metadata_schema_version
+from .base import (
+    BaseBackend,
+    ImageSize,
+    _imgsz_hw,
+    _read_metadata_imgsz,
+    _read_pose_metadata,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _to_compute_unit(compute_units: str):
+    """Same mapping as the exporter — duplicated to avoid pulling export deps in."""
+    import coremltools as ct
+
+    key = compute_units.lower()
+    mapping = {
+        "all": ct.ComputeUnit.ALL,
+        "cpu_and_gpu": ct.ComputeUnit.CPU_AND_GPU,
+        "cpu_and_ne": ct.ComputeUnit.CPU_AND_NE,
+        "cpu_only": ct.ComputeUnit.CPU_ONLY,
+    }
+    if key not in mapping:
+        raise ValueError(
+            f"Invalid compute_units {compute_units!r}. "
+            f"Must be one of: {sorted(mapping)}"
+        )
+    return mapping[key]
+
+
+def _normalize_metadata_supported_tasks(value) -> tuple[str, ...]:
+    try:
+        return normalize_supported_tasks(value)
+    except ValueError:
+        if isinstance(value, str):
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                raise
+            return normalize_supported_tasks(parsed)
+        raise
+
+
+class CoreMLBackend(BaseBackend):
+    """CoreML inference backend (macOS only).
+
+    Args:
+        model_path: Path to a .mlpackage directory.
+        nb_classes: Number of classes (default: 80, overridden by metadata if present).
+        device: Ignored — CoreML routes via compute_units instead.
+        compute_units: 'all' | 'cpu_and_gpu' | 'cpu_and_ne' | 'cpu_only'. Default 'all'.
+    """
+
+    def __init__(
+        self,
+        model_path: str,
+        nb_classes: int = 80,
+        device: str = "auto",
+        compute_units: str = "all",
+        task: str | None = None,
+    ):
+        if sys.platform != "darwin":
+            raise RuntimeError(
+                "CoreML inference requires macOS. "
+                f"Current platform: {sys.platform}."
+            )
+        try:
+            import coremltools as ct
+        except ImportError as e:
+            raise ImportError(
+                "CoreML inference requires coremltools. "
+                "Install with: pip install libreyolo[coreml]"
+            ) from e
+
+        path = Path(model_path)
+        if not path.exists():
+            raise FileNotFoundError(f"CoreML model not found: {model_path}")
+
+        self.model = ct.models.MLModel(
+            str(path), compute_units=_to_compute_unit(compute_units)
+        )
+        spec = self.model.get_spec()
+        self.output_names = [out.name for out in spec.description.output]
+
+        meta = (
+            dict(self.model.user_defined_metadata)
+            if self.model.user_defined_metadata
+            else {}
+        )
+        warn_on_metadata_schema_version(
+            meta,
+            artifact=f"CoreML metadata for {path}",
+            logger=logger,
+        )
+        (
+            model_family,
+            model_size,
+            metadata_task,
+            supported_tasks,
+            default_task,
+            names,
+            imgsz,
+            has_embedded_nms,
+            pose_metadata,
+        ) = self._parse_metadata(
+            meta,
+            nb_classes,
+            output_names=self.output_names,
+        )
+        resolved_task = resolve_task(
+            explicit_task=task,
+            checkpoint_task=metadata_task,
+            default_task=default_task,
+            supported_tasks=supported_tasks,
+        )
+
+        self._has_embedded_nms = has_embedded_nms
+
+        super().__init__(
+            model_path=str(path),
+            nb_classes=len(names) if names else nb_classes,
+            device="coreml",
+            imgsz=imgsz,
+            model_family=model_family,
+            names=names if names else self.build_names(nb_classes),
+            model_size=model_size,
+            task=resolved_task,
+            supported_tasks=supported_tasks,
+            default_task=default_task,
+            **pose_metadata,
+        )
+
+    @staticmethod
+    def _parse_metadata(
+        meta: dict,
+        default_nb_classes: int,
+        *,
+        output_names: list[str] | None = None,
+    ):
+        model_family: Optional[str] = meta.get("model_family") or None
+        model_size: Optional[str] = meta.get("model_size") or meta.get("size") or None
+        default_task = normalize_task(meta.get("default_task"), default="detect")
+        metadata_task = normalize_task(meta.get("task"), default=default_task)
+        supported_tasks = _normalize_metadata_supported_tasks(
+            meta.get("supported_tasks", (metadata_task,))
+        )
+        names: Optional[dict] = None
+        imgsz = 640
+        has_embedded_nms = False
+        pose_metadata = _read_pose_metadata(meta)
+
+        if "names" in meta:
+            try:
+                raw = json.loads(meta["names"])
+                names = {int(k): v for k, v in raw.items()}
+            except (ValueError, TypeError) as e:
+                logger.warning("Failed to parse names metadata: %s", e)
+
+        if names is None and (meta.get("nb_classes") or meta.get("nc")):
+            try:
+                nc = int(meta.get("nb_classes", meta.get("nc")))
+                names = (
+                    {i: n for i, n in enumerate(COCO_CLASSES)}
+                    if nc == 80
+                    else {i: f"class_{i}" for i in range(nc)}
+                )
+            except ValueError:
+                pass
+
+        metadata_imgsz = _read_metadata_imgsz(
+            meta,
+            model_family,
+            artifact="CoreML metadata",
+        )
+        if metadata_imgsz is not None:
+            imgsz = metadata_imgsz
+
+        has_embedded_nms = str(meta.get("nms", "")).lower() == "true"
+        if output_names is not None:
+            has_embedded_nms = has_embedded_nms or set(output_names) == {
+                "confidence",
+                "coordinates",
+            }
+
+        return (
+            model_family,
+            model_size,
+            metadata_task,
+            supported_tasks,
+            default_task,
+            names,
+            imgsz,
+            has_embedded_nms,
+            pose_metadata,
+        )
+
+    def _parse_outputs(
+        self,
+        all_outputs: list,
+        effective_imgsz: ImageSize,
+        original_size: tuple,
+        conf: float,
+        ratio: float | None = None,
+        iou: float = 0.45,
+        max_det: int = 300,
+        **kwargs,
+    ):
+        if ratio is None:
+            ratio = 1.0
+        if self._has_embedded_nms:
+            # Apple's NMS already ran inside the .mlpackage, so iou/max_det are
+            # applied there; they are accepted here only for signature parity
+            # with BaseBackend._parse_outputs.
+            return self._parse_embedded_nms(
+                all_outputs, effective_imgsz, original_size, conf, ratio=ratio
+            )
+        return super()._parse_outputs(
+            all_outputs,
+            effective_imgsz,
+            original_size,
+            conf,
+            ratio=ratio,
+            iou=iou,
+            max_det=max_det,
+            **kwargs,
+        )
+
+    def _build_result(self, *args, iou: float, **kwargs):
+        # Apple's NMS already ran inside the .mlpackage when embedded NMS is on;
+        # neutralize BaseBackend's numpy NMS by using a threshold that never matches.
+        if self._has_embedded_nms:
+            iou = 1.0
+        return super()._build_result(*args, iou=iou, **kwargs)
+
+    def _preprocess(self, image, effective_imgsz: ImageSize, color_format):
+        """Produce a canonical RGB uint8 tensor matching the exported graph's input.
+
+        The .mlpackage was traced with a wrapper that converts canonical RGB[0,1]
+        to whatever the family expects internally (YOLOX BGR/0-255, RF-DETR
+        ImageNet-normalized, etc.). Feeding it the family's already-normalized
+        blob and then un-normalizing is lossy; instead we hand CoreML the
+        canonical RGB uint8 image directly and let the traced wrapper do its job.
+        """
+        img = ImageLoader.load(image, color_format=color_format)
+        original_size = img.size  # (W, H)
+        original_img = img.copy()
+        input_h, input_w = _imgsz_hw(effective_imgsz)
+
+        family = (self.model_family or "").lower()
+        if family == "yolox":
+            # YOLOX uses letterbox + gray padding (no BGR swap, no /255 here —
+            # the traced graph applies those transforms internally).
+            arr = np.array(img)
+            orig_h, orig_w = arr.shape[:2]
+            ratio = min(input_h / orig_h, input_w / orig_w)
+            new_w, new_h = int(orig_w * ratio), int(orig_h * ratio)
+            resized = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            padded = Image.new("RGB", (input_w, input_h), (114, 114, 114))
+            padded.paste(resized, (0, 0))
+            chw = np.array(padded).transpose(2, 0, 1).astype(np.float32)
+        else:
+            # yolo9, rtdetr, rfdetr: plain resize to the exported input.
+            ratio = 1.0
+            resized = img.resize((input_w, input_h), Image.Resampling.BILINEAR)
+            chw = np.array(resized).transpose(2, 0, 1).astype(np.float32)
+
+        tensor = torch.from_numpy(chw).unsqueeze(0)
+        return tensor, original_img, original_size, ratio
+
+    def _parse_embedded_nms(
+        self,
+        all_outputs: list,
+        effective_imgsz: ImageSize,
+        original_size: tuple,
+        conf: float,
+        ratio: float = 1.0,
+    ):
+        output_by_name = {
+            name: np.asarray(value)
+            for name, value in zip(self.output_names, all_outputs)
+        }
+        confidence = output_by_name.get("confidence")
+        coordinates = output_by_name.get("coordinates")
+        if confidence is None or coordinates is None:
+            raise RuntimeError(
+                "CoreML embedded NMS output must include confidence and coordinates"
+            )
+
+        if confidence.ndim == 3:
+            confidence = confidence[0]
+        if coordinates.ndim == 3:
+            coordinates = coordinates[0]
+
+        max_scores = np.max(confidence, axis=1)
+        class_ids = np.argmax(confidence, axis=1)
+        mask = max_scores > conf
+        boxes_raw = coordinates[mask]
+        max_scores = max_scores[mask]
+        class_ids = class_ids[mask]
+
+        if len(boxes_raw) == 0:
+            return np.empty((0, 4)), max_scores, class_ids, None
+
+        orig_w, orig_h = original_size
+        cx, cy, w, h = (
+            boxes_raw[:, 0],
+            boxes_raw[:, 1],
+            boxes_raw[:, 2],
+            boxes_raw[:, 3],
+        )
+        boxes = np.stack(
+            [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+            axis=1,
+        )
+
+        family = (self.model_family or "").lower()
+        if family == "yolox":
+            boxes /= ratio
+        elif family == "rtdetr":
+            boxes[:, [0, 2]] *= orig_w
+            boxes[:, [1, 3]] *= orig_h
+        else:
+            input_h, input_w = _imgsz_hw(effective_imgsz)
+            scale_x = orig_w / input_w
+            scale_y = orig_h / input_h
+            boxes[:, [0, 2]] *= scale_x
+            boxes[:, [1, 3]] *= scale_y
+
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]], 0, orig_w)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]], 0, orig_h)
+        return boxes, max_scores, class_ids, None
+
+    def _run_inference(self, blob: np.ndarray) -> list:
+        """Run CoreML inference on a (1, 3, H, W) canonical RGB uint8 blob.
+
+        ``_preprocess`` produces RGB uint8 (stored as float32 for tensor compat);
+        the .mlpackage's ImageType input handles the [0,1] scaling and any
+        family-specific transform inside the traced wrapper.
+        """
+        if blob.ndim != 4 or blob.shape[0] != 1:
+            raise ValueError(
+                f"CoreMLBackend expects (1, C, H, W) blob; got {blob.shape}"
+            )
+
+        hwc = np.transpose(blob[0], (1, 2, 0))
+        uint8 = np.ascontiguousarray(np.clip(hwc, 0, 255).astype(np.uint8))
+        pil = Image.fromarray(uint8)
+
+        out = self.model.predict({"image": pil})
+        return [np.asarray(out[name]) for name in self.output_names if name in out]

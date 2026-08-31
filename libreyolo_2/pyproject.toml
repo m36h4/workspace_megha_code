@@ -1,0 +1,500 @@
+[project]
+name = "libreyolo"
+version = "1.5.0"
+description = "Libre YOLO - An open source YOLO library with MIT license."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = [
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.txt",
+    "weights/LICENSE_NOTICE.txt",
+    "licenses/Apache-2.0.txt",
+]
+authors = [
+    {name = "LibreYOLO Team"}
+]
+dependencies = [
+    "numpy>=1.19.0",
+    "Pillow>=9.1.0",
+    "torch>=2.4.0",
+    "torchvision>=0.19.0",
+    "PyYAML>=6.0",
+    "requests>=2.25.0",
+    "opencv-python>=4.11.0.86",
+    "mss>=9.0.1",
+    "tqdm>=4.65.0",
+    "pycocotools>=2.0.0",
+    "typer>=0.9.0",
+    "click>=8.0.0",
+    "safetensors>=0.4.0",
+    "scipy>=1.7.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-timeout>=2.3.1",
+    "pytest-xdist>=3.6",
+    "ruff>=0.14.10",
+    "ty>=0.0.1",
+]
+
+[project.optional-dependencies]
+stream = [
+    # YouTube page URLs are resolved lazily to direct media URLs. Webcam,
+    # RTSP/RTMP/TCP/UDP, HLS, and local multi-stream inputs need no extra.
+    "yt-dlp",
+]
+onnx = [
+    "onnx>=1.14.0",
+    "onnxsim>=0.4.0",
+    "onnxruntime>=1.16.0",
+]
+triton = [
+    # HTTP/HTTPS V2 inference only. gRPC and shared-memory extras are excluded.
+    "tritonclient[http]>=2.40.0",
+]
+executorch = [
+    # Fixed-shape FP32 .pte export and Python runtime validation. Kept out of
+    # aggregate extras because ExecuTorch constrains the compatible Torch pair.
+    "executorch",
+]
+coreai = [
+    # Core AI (.aimodel) export, macOS only: the toolchain neither converts
+    # nor runs elsewhere. Kept out of every aggregate extra on purpose,
+    # because coreai-torch pins torch to 2.11.x and would drag the whole
+    # environment onto that version.
+    "coreai-torch>=0.4.1; sys_platform == 'darwin'",
+]
+rfdetr = [
+    "transformers>=5.1.0",
+]
+eomt = [
+    "transformers>=5.1.0",
+]
+midas = [
+    # MiDaS's official ViT-L/16 and EfficientNet-Lite3 encoders. The bounded
+    # 1.0 series preserves the checkpoint keys and bitwise parity validated by
+    # the native port without relying on MiDaS's historical Torch Hub fetch.
+    "timm>=1.0.28,<1.1",
+]
+lora = [
+    # LoRA / PEFT fine-tuning (lora=True) for transformer backbones (RF-DETR).
+    "libreyolo[rfdetr]",
+    "peft>=0.12.0",
+]
+plots = [
+    "matplotlib>=3.7.0",
+]
+fast-eval = [
+    # C++ COCO eval backend. Preferred by default (faster_coco_eval=True) and
+    # transparently skipped when absent, so this stays an extra rather than a
+    # hard dependency: it ships compiled wheels, and a source build on a
+    # platform without one must not be able to break a plain `pip install`.
+    "faster-coco-eval>=1.7.0",
+]
+vlm = [
+    # VLM-as-detector families load through transformers.
+    # huggingface_hub (used for snapshot download) ships with transformers.
+    "transformers>=5.1.0",
+    # SmolVLM2's processor requires num2words.
+    "num2words>=0.5.0",
+    # LocateAnything's HF remote-code processor/model imports these at load time.
+    "decord==0.6.0",
+    "lmdb>=1.7.0",
+    "peft>=0.12.0",
+]
+sam = [
+    # Promptable-segmentation families load through transformers;
+    # EdgeTAM's RepViT backbone uses Transformers' TimmWrapper.
+    "transformers>=5.3.0",
+    "timm>=1.0.23",
+]
+hub-kernels = [
+    # Optional runtime loader for compiled Hub kernels (e.g. the
+    # ms_deform_attn slot). Installing this extra is the opt-in; disable
+    # with LIBREYOLO_HUB_KERNELS=0. See docs/kernels.md.
+    "kernels>=0.6.0",
+]
+openvocab = [
+    # Discriminative open-vocabulary detectors load through transformers
+    # (GroundingDinoForObjectDetection / Owlv2ForObjectDetection /
+    # OmDetTurboForObjectDetection). OMDet-Turbo's configured Swin backbone
+    # is instantiated through transformers' TimmBackbone.
+    "transformers>=5.1.0",
+    "timm>=1.0.0",
+    # OV-DEIM embeds text prompts with the vendored CLIP BPE tokenizer, which
+    # needs these at predict time (Unicode \p{L}/\p{N} classes + ftfy fixing).
+    "regex>=2023.0.0",
+    "ftfy>=6.0.0",
+]
+sensenova = [
+    # SenseNova-Vision (Bagel-MoT): the vendored architecture loads through
+    # accelerate's big-model dispatch; the tokenizer and activation registry
+    # come from transformers. flash-attn is optional (SDPA fallback built in).
+    "transformers>=5.1.0",
+    "accelerate>=1.7.0",
+    # 4-bit NF4 loading on consumer GPUs; no macOS wheels.
+    "bitsandbytes>=0.45.0; sys_platform != 'darwin'",
+]
+modus = [
+    # LibreMODUS uses the vendored Bagel/Qwen2/SigLIP architecture and
+    # accelerate big-model dispatch. No remote code or feature VQ tokenizer
+    # package is loaded.
+    "transformers>=5.1.0",
+    "accelerate>=1.7.0",
+]
+label = [
+    # AI-assist for `libreyolo label`: SAM click-to-mask via the LibreSAM tier.
+    # The manual labeller and model-assisted box auto-label work without this.
+    "libreyolo[sam]",
+]
+tensorrt = [
+    # No CUDA on macOS; marker drops these. Version pin must match the
+    # [[tool.uv.dependency-metadata]] blocks below.
+    "tensorrt-cu12==10.16.1.11; sys_platform != 'darwin'",
+    "pycuda>=2022.1; sys_platform != 'darwin'",
+]
+openvino = [
+    "openvino>=2024.0.0",
+]
+paddle = [
+    "libreyolo[onnx]",
+    # X2Paddle 1.6.0 imports onnx.mapping, removed after ONNX 1.17.
+    "onnx>=1.14.0,<1.18",
+    # X2Paddle 1.6.0 generates a valid YOLO9 static graph with Paddle 2.6.2.
+    # Paddle 3.x rejects the generated mixed scalar arithmetic during capture.
+    "paddlepaddle==2.6.2",
+    "x2paddle==1.6.0",
+    # Imported by X2Paddle but omitted from its wheel metadata.
+    "six>=1.16.0",
+]
+mnn = [
+    "libreyolo[onnx]",
+    "MNN>=3.6.1",
+]
+ncnn = [
+    "pnnx",
+    "ncnn",
+]
+tflite = [
+    "libreyolo[onnx]",
+    # onnx2tf 2.4.3 includes the RF-DETR conversion fixes required by this path.
+    # Requires Python 3.12+ (onnx2tf 2.4.x wheel constraint).
+    "onnx2tf>=2.4.3; python_version >= '3.12'",
+    # Runtime used by TFLiteBackend to execute exported .tflite artifacts.
+    "ai-edge-litert>=2.1.2; python_version >= '3.12'",
+    # Required for the RF-DETR GridSample ONNX graph rewrite (fallback path).
+    "onnx-graphsurgeon>=0.3.27",
+    # Required for RF-DETR onnxsim preprocessing step.
+    "onnx-simplifier>=0.4.36",
+]
+# LiteRT is Google's current name for TensorFlow Lite; same export path,
+# same .tflite output. Separate extra so both names install.
+litert = [
+    "libreyolo[tflite]",
+]
+# Intentionally empty: all tracking dependencies (e.g. scipy) are core deps,
+# so `libreyolo[tracking]` installs nothing extra. Kept for a stable extra name.
+tracking = []
+rtdetr = []
+gaze = [
+    # Enables best-effort auto-download of the L2CS Gaze360 checkpoint from
+    # the official Google Drive (large-file confirm-token handling). Without
+    # it, LibreL2CS prints manual download instructions instead.
+    "gdown>=5.1.0",
+]
+clip = [
+    # LibreCLIP towers are native torch (no open_clip at runtime). Only the
+    # vendored BPE text tokenizer needs these to reproduce CLIP's exact token
+    # IDs (Unicode \p{L}/\p{N} classes + ftfy text fixing).
+    "regex>=2023.0.0",
+    "ftfy>=6.0.0",
+]
+clip-convert = [
+    # Convert-/parity-only: re-host OpenCLIP LAION-2B weights as LibreCLIP
+    # checkpoints (weights/convert_clip_weights.py) and run the parity tests.
+    "libreyolo[clip]",
+    "open_clip_torch>=2.24.0",
+]
+siglip2 = [
+    # LibreSigLIP2 towers are native torch (no transformers at runtime). Only the
+    # multilingual SentencePiece text tokenizer (Gemma vocab) needs this.
+    "sentencepiece>=0.1.99",
+]
+siglip2-convert = [
+    # Convert-/parity-only: re-host Apache-2.0 google/siglip2-* weights as
+    # LibreSigLIP2 checkpoints (weights/convert_siglip2_weights.py) and run the
+    # parity tests against the reference SiglipModel.
+    "libreyolo[siglip2]",
+    "transformers>=5.1.0",
+]
+coreml = [
+    "coremltools>=8.0",
+]
+tensorboard = [
+    "tensorboard>=2.13.0",
+]
+mlflow = [
+    "mlflow>=2.9.0",
+]
+wandb = [
+    "wandb>=0.16.0",
+]
+comet = [
+    "comet-ml>=3.47.1",
+]
+clearml = [
+    "clearml>=1.17.0",
+]
+neptune = [
+    "neptune-scale>=0.30.0",
+]
+dvclive = [
+    "dvclive>=3.49.0",
+]
+dvc = [
+    "libreyolo[dvclive]",
+]
+all = [
+    "libreyolo[stream]",
+    "libreyolo[onnx]",
+    "libreyolo[triton]",
+    "libreyolo[rfdetr]",
+    "libreyolo[eomt]",
+    "libreyolo[midas]",
+    "libreyolo[lora]",
+    "libreyolo[plots]",
+    "libreyolo[tensorrt]",
+    "libreyolo[tflite]",
+    "libreyolo[openvino]",
+    "libreyolo[paddle]",
+    "libreyolo[mnn]",
+    "libreyolo[ncnn]",
+    "libreyolo[tracking]",
+    "libreyolo[rtdetr]",
+    "libreyolo[gaze]",
+    "libreyolo[clip]",
+    "libreyolo[siglip2]",
+    "libreyolo[coreml]",
+    "libreyolo[vlm]",
+    "libreyolo[sam]",
+    "libreyolo[label]",
+    "libreyolo[openvocab]",
+    "libreyolo[sensenova]",
+    "libreyolo[modus]",
+    "libreyolo[tensorboard]",
+    "libreyolo[mlflow]",
+    "libreyolo[wandb]",
+    "libreyolo[comet]",
+    "libreyolo[clearml]",
+    "libreyolo[dvclive]",
+    # Keep Neptune separate: stable neptune-scale requires protobuf<7 while
+    # the TFLite/onnx2tf extra included above requires protobuf 7.
+]
+
+[project.scripts]
+libreyolo = "libreyolo.cli:entrypoint"
+
+[project.urls]
+Homepage = "https://github.com/LibreYOLO"
+Repository = "https://github.com/LibreYOLO/libreyolo"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+libreyolo = [
+    "assets/*.jpg",
+    "config/**/*.yaml",
+    "training/*.yaml",
+    "data/*.json",
+    "data/*.txt",
+    "models/clip/*.gz",
+    "models/clip/data/*.json",
+    "models/siglip2/*.model",
+    "models/siglip2/data/*.json",
+    "models/darknet/cfgs/*.cfg",
+    "models/yolo7/*.yaml",
+    "models/**/NOTICE",
+    "models/**/LICENSE",
+    "models/**/*.md",
+]
+
+[tool.setuptools.packages.find]
+include = ["libreyolo*"]
+
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# tensorrt-cu12 is sdist-only and its setup.py refuses to run on macOS, so
+# uv's universal lock can't extract its metadata on darwin hosts. Static
+# metadata lets uv resolve the non-darwin fork without building. Bump in
+# lockstep with the version pin in [project.optional-dependencies].tensorrt.
+# Pull torch/torchvision from the PyTorch CUDA 12.8 index on Linux/Windows so
+# `uv sync` produces a GPU-enabled environment by default. macOS keeps the
+# PyPI default (CPU/MPS wheel) since download.pytorch.org has no darwin builds.
+# Requires NVIDIA driver >= 555 (CUDA 12.8 runtime) on the host.
+[tool.uv]
+conflicts = [
+    [{ extra = "neptune" }, { extra = "tflite" }],
+    [{ extra = "neptune" }, { extra = "litert" }],
+    [{ extra = "neptune" }, { extra = "all" }],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.dependency-metadata]]
+name = "tensorrt-cu12"
+version = "10.16.1.11"
+requires-dist = [
+    "tensorrt-cu12-libs==10.16.1.11",
+    "tensorrt-cu12-bindings==10.16.1.11",
+]
+requires-python = ">=3.8"
+
+[[tool.uv.dependency-metadata]]
+name = "tensorrt-cu12-libs"
+version = "10.16.1.11"
+requires-dist = []
+
+[[tool.uv.dependency-metadata]]
+name = "tensorrt-cu12-bindings"
+version = "10.16.1.11"
+requires-dist = []
+
+[tool.ruff]
+# Vendored from upstream DEIMv2. Keep local lint focused on the LibreYOLO
+# wrapper/integration code instead of rewriting third-party implementation files.
+extend-exclude = [
+    "libreyolo/models/deimv2/engine",
+    "libreyolo/models/depth_anything3/_vendor",
+]
+
+[tool.ty.rules]
+# Rules that catch real bugs — keep as errors
+invalid-parameter-default = "error"
+
+# Rules that produce false positives with PyTorch nn.Module dynamic attrs
+# and C extensions without type stubs (tensorrt, ncnn, pycuda).
+# Downgrade to warnings so they don't block CI but remain visible.
+unresolved-import = "warn"       # optional deps not installed in dev env
+unresolved-attribute = "warn"    # nn.Module.__getattr__, C extension members
+invalid-argument-type = "warn"   # torch.onnx.export kwargs, tensor ops
+not-subscriptable = "warn"       # tensor[int] operations
+unsupported-operator = "warn"    # tensor arithmetic
+not-iterable = "warn"            # Module/tensor iterations
+call-non-callable = "warn"       # Module.__call__
+invalid-method-override = "warn" # template method + nn.Module patterns
+invalid-assignment = "warn"      # nn.Module dynamic attrs, tensor ops
+invalid-return-type = "warn"     # torch return type inference
+index-out-of-bounds = "warn"     # tensor indexing
+unknown-argument = "warn"        # dynamic kwargs patterns
+no-matching-overload = "warn"    # torch overloaded functions
+possibly-missing-attribute = "warn"
+
+[[tool.ty.overrides]]
+include = ["vision_analysis_benchmark/**", "tests/**"]
+
+[tool.ty.overrides.rules]
+# Benchmark and test code: suppress all to avoid noise
+unresolved-import = "ignore"
+
+[tool.pytest.ini_options]
+addopts = "-m unit"
+testpaths = ["tests"]
+# Only the thread method can interrupt a test wedged inside a native call, such
+# as a stalled Hugging Face download; the signal method cannot fire until
+# control returns to Python. The limit itself comes from PYTEST_TIMEOUT, which
+# the e2e target sets, so unit runs stay unbounded.
+timeout_method = "thread"
+markers = [
+    "unit: fast tests that avoid external weights or large files",
+    "vit: tests covering the ViT classification family",
+    "swin: tests covering the Swin classification family",
+    "external_data: tests that require external datasets, weights, or staged large files",
+    "network: tests that intentionally use non-local network access",
+    "e2e: end-to-end tests requiring full model loading and inference",
+    "general_nightly: curated native inference checks in the default nightly",
+    "flagship_nightly: heavier nightly checks for flagship YOLO9/RF-DETR models",
+    "cuda_graph: opt-in tests requiring CUDA graph capture and replay",
+    "extended_training: opt-in multi-epoch or non-core task training tests",
+    "training_nightly: opt-in GPU checks for training-time CUDA graph capture",
+    "export_backend: tests covering an export backend or serialized runtime format",
+    "supported_backend: tests covering a release-blocking supported backend",
+    "extended_backend: tests covering an extended backend",
+    "onnx: tests covering ONNX export or inference",
+    "triton: tests covering NVIDIA Triton HTTP inference",
+    "torchscript: tests covering TorchScript export or inference",
+    "executorch: tests requiring the optional ExecuTorch exporter/runtime",
+    "smoke: fast end-to-end pipeline checks on tiny synthetic data (CPU, <60s)",
+    "tensorrt: tests requiring TensorRT",
+    "trt: alias for TensorRT tests requiring TensorRT",
+    "openvino: tests requiring OpenVINO",
+    "mnn: tests requiring MNN",
+    "ncnn: tests requiring ncnn",
+    "tflite: tests requiring TensorFlow Lite export",
+    "paddle: tests requiring PaddlePaddle export/runtime",
+    "coreml: tests requiring CoreML (macOS only)",
+    "yolox: tests covering the YOLOX model family",
+    "yolo7: tests covering the YOLOv7 model family",
+    "yolo9: tests covering the YOLO9 model family",
+    "yolo9_e2e: tests covering the YOLOv9-E2E model family",
+    "yolonas: tests covering the YOLO-NAS model family",
+    "rfdetr: tests covering the RF-DETR model family",
+    "detr: tests covering the original DETR model family",
+    "deit: tests covering the DeiT image-classification family",
+    "deeplabv3: tests covering the DeepLabv3 semantic segmentation family",
+    "lwdetr: tests covering the LW-DETR model family",
+    "faster_rcnn: tests covering the Faster R-CNN model family",
+    "retinanet: tests covering the RetinaNet model family",
+    "ssd: tests covering the SSD model family",
+    "mask_rcnn: tests covering the Mask R-CNN model family",
+    "fcn: tests covering the FCN semantic-segmentation family",
+    "fcos: tests covering the FCOS model family",
+    "deformable_detr: tests covering the Deformable DETR model family",
+    "dinodetr: tests covering the DINO-DETR model family",
+    "centernet: tests covering the CenterNet model family",
+    "dfine: tests covering the D-FINE model family",
+    "domedetr: tests covering the Dome-DETR tiny-object model family",
+    "deim: tests covering the DEIM model family",
+    "deimv2: tests covering the DEIMv2 model family",
+    "ec: tests covering the ECDet model family",
+    "rtdetr: tests covering the RT-DETR model family",
+    "rtdetrv2: tests covering the RT-DETRv2 model family",
+    "rtdetrv4: tests covering the RT-DETRv4 model family",
+    "picodet: tests covering the PICODET model family",
+    "efficientdet: tests covering the EfficientDet model family",
+    "rtmdet: tests covering the RTMDet model family",
+    "l2cs: tests covering the L2CS gaze estimation family",
+    "hrnet: tests covering the HRNet top-down pose family",
+    "fomo: tests covering the LibreFOMO point-localizer family",
+    "alexnet: tests covering the LibreAlexNet image-classification family",
+    "vgg: tests covering the LibreVGG classification family",
+    "vlm: tests covering the LibreVLM (VLM-as-detector) tier",
+    "sam: tests covering the LibreSAM (promptable-segmentation) tier",
+    "openvocab: tests covering the LibreOpenVocab detector tier",
+    "sensenova: tests covering the LibreSenseNovaVision unified multimodal family",
+    "modus: tests covering the external-weight LibreMODUS any-to-any family",
+    "clip: tests covering the LibreCLIP zero-shot open-vocabulary classifier family",
+    "siglip2: tests covering the LibreSigLIP2 zero-shot open-vocabulary classifier family",
+    "midas: tests covering the MiDaS relative-depth family",
+    "distributed: multi-rank gloo tests that mp.spawn a process group. Linux-only in the PR gate: they exercise distributed-training math, which is platform-independent, while dist.init_process_group(backend='gloo') costs ~105s per test on the macOS runner (a bare 2-rank scalar all-reduce takes 109s there vs 3.9s on Linux). They also compare a parent-process reference gradient against child-process gradients at a BLAS-sensitive tolerance, so running them on every OS yields flakes rather than coverage. The spawn-plumbing tests are deliberately NOT marked: they cover spawn-only failure modes that Linux's fork never hits.",
+    "rf1: RF1 training tests",
+    "rf5: RF5 training benchmark tests",
+    "slow: slow tests that may take several minutes",
+]

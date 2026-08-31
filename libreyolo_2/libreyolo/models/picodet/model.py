@@ -1,0 +1,284 @@
+"""LibrePICODET: BaseModel subclass wiring PICODET into the LibreYOLO factory."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+from libreyolo.training.ddp_spawn import ddp_aware
+from PIL import Image
+
+from ...training.callbacks import TrainCallbacks
+from ...training.config import PICODETConfig
+from ...utils.image_loader import ImageInput
+from ...validation.preprocessors import PICODETValPreprocessor
+from ..base import BaseModel
+from .nn import LibrePICODETModel
+from ...postprocess.picodet import postprocess as _picodet_postprocess
+from .utils import preprocess_image as _picodet_preprocess
+
+
+_TRAIN_DEFAULTS = PICODETConfig()
+
+
+class LibrePICODET(BaseModel):
+    """PICODET object detector (s/m/l).
+
+    Examples::
+
+        >>> model = LibreYOLO("LibrePICODETs.pt")
+        >>> dets = model(image="image.jpg")
+
+        >>> model = LibrePICODET(size="s")
+        >>> model.train(data="coco128.yaml", epochs=10)
+    """
+
+    FAMILY = "picodet"
+    FILENAME_PREFIX = "LibrePICODET"
+    # Forward is pure tensor work with no host sync, verified to capture and
+    # replay bit-identically (tests/unit/test_cuda_graph_families.py).
+    SUPPORTS_CUDA_GRAPH = True
+    INPUT_SIZES = {"s": 320, "m": 416, "l": 640}
+    TRAIN_CONFIG = PICODETConfig
+    val_preprocessor_class = PICODETValPreprocessor
+
+    # ---- registry --------------------------------------------------------
+
+    @classmethod
+    def can_load(cls, weights_dict: dict) -> bool:
+        # Tokens unique to PICODET: shared GFL head + ESNet block list.
+        # Avoids matching YOLOX (``head.stems``), YOLOv9, DETR families, etc.
+        has_gfl = any("head.gfl_cls" in k for k in weights_dict)
+        has_esnet = any("backbone.blocks" in k for k in weights_dict)
+        return has_gfl and has_esnet
+
+    @classmethod
+    def detect_size(cls, weights_dict: dict) -> Optional[str]:
+        # Distinguish via the first stage's output channels: s=24->96, m=24->128, l=24->160.
+        # ``backbone.blocks.0`` is an ESBlockDS; its ``conv_pw_2.conv`` has
+        # ``out_channels = mid_channels // 2`` and ``in_channels=24`` (stem out).
+        # The unambiguous tell is the neck transformer: ``neck.trans.0.conv.weight``
+        # has shape (neck_ch, backbone_c3_ch, 1, 1).
+        key = "neck.trans.0.conv.weight"
+        if key not in weights_dict:
+            return None
+        neck_ch = weights_dict[key].shape[0]
+        return {96: "s", 128: "m", 160: "l"}.get(int(neck_ch))
+
+    @classmethod
+    def detect_nb_classes(cls, weights_dict: dict) -> Optional[int]:
+        key = "head.gfl_cls.0.weight"
+        if key not in weights_dict:
+            return None
+        # Shared cls/reg head: out_channels = num_classes + 4 * (reg_max + 1).
+        # PICODET uses reg_max=7 -> 32 reg channels. Subtract.
+        out_ch = int(weights_dict[key].shape[0])
+        nc = out_ch - 32
+        return nc if nc > 0 else None
+
+    @classmethod
+    def convert_upstream_state_dict(cls, weights_dict: dict) -> Optional[dict]:
+        """Remap Bo-style mmdet key naming to LibreYOLO's flattened port."""
+        from .convert import convert_upstream, is_upstream_state_dict
+
+        if not is_upstream_state_dict(weights_dict):
+            return None
+        converted = convert_upstream(weights_dict)
+        return converted if cls.can_load(converted) else None
+
+    # ---- init ------------------------------------------------------------
+
+    def __init__(
+        self,
+        model_path=None,
+        size: str = "s",
+        nb_classes: int = 80,
+        device: str = "auto",
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            model_path=model_path,
+            size=size,
+            nb_classes=nb_classes,
+            device=device,
+            **kwargs,
+        )
+        if isinstance(model_path, str):
+            self._load_weights(model_path)
+
+    def _init_model(self) -> nn.Module:
+        return LibrePICODETModel(size=self.size, nb_classes=self.nb_classes)
+
+    def _get_available_layers(self) -> Dict[str, nn.Module]:
+        return {
+            "backbone_conv1": self.model.backbone.conv1,
+            "backbone_blocks": self.model.backbone.blocks,
+            "neck": self.model.neck,
+            "head": self.model.head,
+        }
+
+    def _strict_loading(self) -> bool:
+        # Converted Paddle/Bo checkpoints may carry init_cfg state, EMA buffers,
+        # or auxiliary keys we drop. Strict loading would refuse them.
+        return False
+
+    # ---- inference -------------------------------------------------------
+
+    @staticmethod
+    def _get_preprocess_numpy():
+        from .utils import preprocess_numpy
+        return preprocess_numpy
+
+    def _preprocess(
+        self,
+        image: ImageInput,
+        color_format: str = "auto",
+        input_size: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, Image.Image, Tuple[int, int], float]:
+        eff = input_size if input_size is not None else self.input_size
+        return _picodet_preprocess(image, input_size=eff, color_format=color_format)
+
+    def _forward(self, input_tensor: torch.Tensor) -> Any:
+        return self.model(input_tensor)
+
+    def _postprocess(
+        self,
+        output: Any,
+        conf_thres: float,
+        iou_thres: float,
+        original_size: Tuple[int, int],
+        max_det: int = 100,
+        ratio: float = 1.0,
+        **kwargs,
+    ) -> Dict:
+        actual_input_size = kwargs.get("input_size", self.input_size)
+        return _picodet_postprocess(
+            output,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            input_size=actual_input_size,
+            original_size=original_size,
+            max_det=max_det,
+        )
+
+    # ---- training --------------------------------------------------------
+
+    @ddp_aware()
+    def train(
+        self,
+        data: str,
+        *,
+        epochs: int = _TRAIN_DEFAULTS.epochs,
+        batch: int = _TRAIN_DEFAULTS.batch,
+        imgsz: int | None = None,
+        lr0: float = _TRAIN_DEFAULTS.lr0,
+        optimizer: str = _TRAIN_DEFAULTS.optimizer,
+        device: str = "",
+        workers: int = _TRAIN_DEFAULTS.workers,
+        seed: int = _TRAIN_DEFAULTS.seed,
+        project: str = _TRAIN_DEFAULTS.project,
+        name: str = _TRAIN_DEFAULTS.name,
+        exist_ok: bool = _TRAIN_DEFAULTS.exist_ok,
+        pretrained: bool = True,
+        resume: bool = _TRAIN_DEFAULTS.resume,
+        amp: bool = _TRAIN_DEFAULTS.amp,
+        patience: int = _TRAIN_DEFAULTS.patience,
+        allow_download_scripts: bool = False,
+        callbacks: TrainCallbacks = None,
+        loggers=None,
+        **kwargs: Any,
+    ) -> dict:
+        """Fine-tune PICODET on a YOLO-format dataset.
+
+        Loss components and the assigner follow Bo's upstream recipe (VFL +
+        DFL + GIoU + SimOTA, with classification-quality weighting and dynamic
+        IoU VFL targets). Inference is bit-equivalent to upstream on the same
+        checkpoint. PICODET-s/320 has not reliably cleared LibreYOLO's RF1
+        floor on the 30-image, two-class fine-tune fixture. Full-dataset
+        convergence, multi-GPU behavior, and augmentation beyond horizontal
+        flipping have not been validated.
+
+        Args:
+            callbacks: Optional training callback or iterable of callbacks.
+            loggers: Optional built-in experiment loggers: a registered name,
+                a configured logger instance, or an iterable mixing both.
+        """
+        from libreyolo.data import load_data_config
+
+        from .trainer import PICODETTrainer
+
+        if imgsz is None:
+            imgsz = self.input_size
+
+        try:
+            data_config = load_data_config(
+                data, autodownload=True, allow_scripts=allow_download_scripts,
+            )
+            data = data_config.get("yaml_file", data)
+        except Exception as e:
+            raise FileNotFoundError(f"Failed to load dataset config '{data}': {e}")
+
+        yaml_nc = data_config.get("nc")
+        yaml_names = data_config.get("names")
+        # If no nc in data.yaml, infer it by counting.
+        if yaml_nc is None and yaml_names is not None:
+            yaml_nc = len(yaml_names)
+        if yaml_nc is not None and yaml_nc != self.nb_classes:
+            self._rebuild_for_new_classes(yaml_nc)
+        if yaml_names is not None:
+            if isinstance(yaml_names, list):
+                yaml_names = {i: n for i, n in enumerate(yaml_names)}
+            self.names = self._sanitize_names(yaml_names, self.nb_classes)
+
+        if seed >= 0:
+            import random
+            import numpy as np
+
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            if str(device).lower() not in ("cpu", "mps") and torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+        trainer = PICODETTrainer(
+            model=self.model,
+            wrapper_model=self,
+            size=self.size,
+            num_classes=self.nb_classes,
+            data=data,
+            epochs=epochs,
+            batch=batch,
+            imgsz=imgsz,
+            lr0=lr0,
+            optimizer=optimizer.lower(),
+            device=device if device else "auto",
+            workers=workers,
+            seed=seed,
+            project=project,
+            name=name,
+            exist_ok=exist_ok,
+            resume=resume,
+            amp=amp,
+            patience=patience,
+            allow_download_scripts=allow_download_scripts,
+            callbacks=callbacks,
+            loggers=loggers,
+            **kwargs,
+        )
+
+        if resume:
+            if not self.model_path:
+                raise ValueError(
+                    "resume=True requires a checkpoint. Load one first: "
+                    "model = LibrePICODET('path/to/last.pt'); model.train(data=..., resume=True)"
+                )
+            trainer.setup()
+            trainer.resume(str(self.model_path))
+
+        results = trainer.train()
+        best_ckpt = results.get("best_checkpoint")
+        if best_ckpt and Path(best_ckpt).exists():
+            self._load_weights(best_ckpt)
+        return results

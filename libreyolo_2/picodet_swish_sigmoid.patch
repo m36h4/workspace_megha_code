@@ -1,0 +1,147 @@
+diff --git a/libreyolo/models/picodet/nn.py b/libreyolo/models/picodet/nn.py
+index 178743bb..9c015817 100644
+--- a/libreyolo/models/picodet/nn.py
++++ b/libreyolo/models/picodet/nn.py
+@@ -48,7 +48,7 @@ def _make_act(act: str | None) -> nn.Module:
+     name = act.lower()
+     if name in ("relu",):
+         return nn.ReLU(inplace=True)
+-    if name in ("hswish", "hardswish", "h_swish"):
++    if name in ("swish", "hardswish", "h_swish"):
+         return nn.Hardswish(inplace=True)
+     if name in ("leakyrelu", "leaky_relu"):
+         return nn.LeakyReLU(0.1, inplace=True)
+@@ -74,7 +74,7 @@ class ConvBNAct(nn.Module):
+         padding: int | None = None,
+         groups: int = 1,
+         bias: bool = False,
+-        act: str | None = "hswish",
++        act: str | None = "swish",
+     ) -> None:
+         super().__init__()
+         if padding is None:
+@@ -105,7 +105,7 @@ class DepthwiseSeparableConv(nn.Module):
+         out_channels: int,
+         kernel_size: int = 5,
+         stride: int = 1,
+-        act: str | None = "hswish",
++        act: str | None = "swish",
+     ) -> None:
+         super().__init__()
+         self.depthwise_conv = ConvBNAct(
+@@ -151,7 +151,7 @@ class SELayer(nn.Module):
+         self.conv1 = nn.Conv2d(channels, mid, 1)
+         self.act1 = nn.ReLU(inplace=True)
+         self.conv2 = nn.Conv2d(mid, channels, 1)
+-        self.act2 = HSigmoid()
++        self.act2 = nn.Sigmoid()
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         scale = F.adaptive_avg_pool2d(x, 1)
+@@ -165,13 +165,13 @@ class ESBlock(nn.Module):
+ 
+     def __init__(self, in_channels: int, mid_channels: int, out_channels: int) -> None:
+         super().__init__()
+-        self.conv_pw = ConvBNAct(in_channels // 2, mid_channels // 2, 1, act="hswish")
++        self.conv_pw = ConvBNAct(in_channels // 2, mid_channels // 2, 1, act="swish")
+         self.conv_dw = ConvBNAct(
+             mid_channels // 2, mid_channels // 2, 3,
+             groups=mid_channels // 2, act=None,
+         )
+         self.se = SELayer(mid_channels)
+-        self.conv_linear = ConvBNAct(mid_channels, out_channels // 2, 1, act="hswish")
++        self.conv_linear = ConvBNAct(mid_channels, out_channels // 2, 1, act="swish")
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         x1, x2 = torch.split(x, x.shape[1] // 2, dim=1)
+@@ -194,22 +194,22 @@ class ESBlockDS(nn.Module):
+             in_channels, in_channels, 3, stride=2,
+             groups=in_channels, act=None,
+         )
+-        self.conv_linear_1 = ConvBNAct(in_channels, out_channels // 2, 1, act="hswish")
++        self.conv_linear_1 = ConvBNAct(in_channels, out_channels // 2, 1, act="swish")
+ 
+         # Branch 2: pw -> dw stride-2 -> SE -> linear pw
+-        self.conv_pw_2 = ConvBNAct(in_channels, mid_channels // 2, 1, act="hswish")
++        self.conv_pw_2 = ConvBNAct(in_channels, mid_channels // 2, 1, act="swish")
+         self.conv_dw_2 = ConvBNAct(
+             mid_channels // 2, mid_channels // 2, 3, stride=2,
+             groups=mid_channels // 2, act=None,
+         )
+         self.se = SELayer(mid_channels // 2)
+-        self.conv_linear_2 = ConvBNAct(mid_channels // 2, out_channels // 2, 1, act="hswish")
++        self.conv_linear_2 = ConvBNAct(mid_channels // 2, out_channels // 2, 1, act="swish")
+ 
+         # Post-concat refinement (HSwish on both, per Bo's repo)
+         self.conv_dw_mv1 = ConvBNAct(
+-            out_channels, out_channels, 3, groups=out_channels, act="hswish",
++            out_channels, out_channels, 3, groups=out_channels, act="swish",
+         )
+-        self.conv_pw_mv1 = ConvBNAct(out_channels, out_channels, 1, act="hswish")
++        self.conv_pw_mv1 = ConvBNAct(out_channels, out_channels, 1, act="swish")
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         x1 = self.conv_linear_1(self.conv_dw_1(x))
+@@ -267,7 +267,7 @@ class ESNet(nn.Module):
+             stage_channels[1], stage_channels[2], stage_channels[3]
+         )
+ 
+-        self.conv1 = ConvBNAct(3, stage_channels[0], 3, stride=2, act="hswish")
++        self.conv1 = ConvBNAct(3, stage_channels[0], 3, stride=2, act="swish")
+         self.max_pool = nn.MaxPool2d(3, stride=2, padding=1)
+ 
+         # Block list. Bo's repo uses ``setattr`` with names like ``2_1``, but a
+@@ -317,7 +317,7 @@ class DarknetBottleneck(nn.Module):
+         expansion: float = 1.0,
+         add_identity: bool = True,
+         use_depthwise: bool = True,
+-        act: str = "hswish",
++        act: str = "swish",
+     ) -> None:
+         super().__init__()
+         hidden = int(out_channels * expansion)
+@@ -356,7 +356,7 @@ class CSPLayer(nn.Module):
+         num_blocks: int = 1,
+         add_identity: bool = True,
+         use_depthwise: bool = True,
+-        act: str = "hswish",
++        act: str = "swish",
+     ) -> None:
+         super().__init__()
+         mid = int(out_channels * expand_ratio)
+@@ -395,7 +395,7 @@ class CSPPAN(nn.Module):
+         expansion: float = 1.0,
+         num_csp_blocks: int = 1,
+         use_depthwise: bool = True,
+-        act: str = "hswish",
++        act: str = "swish",
+     ) -> None:
+         super().__init__()
+         self.in_channels = list(in_channels)
+@@ -505,7 +505,7 @@ class PicoHead(nn.Module):
+         strides: Sequence[int] = (8, 16, 32, 64),
+         share_cls_reg: bool = True,
+         use_depthwise: bool = True,
+-        act: str = "hswish",
++        act: str = "swish",
+     ) -> None:
+         super().__init__()
+         self.num_classes = num_classes
+@@ -671,7 +671,7 @@ class LibrePICODETModel(nn.Module):
+             expansion=1.0,
+             num_csp_blocks=1,
+             use_depthwise=True,
+-            act="hswish",
++            act="swish",
+         )
+         self.head = PicoHead(
+             in_channels=spec["neck_ch"],  # type: ignore[arg-type]
+@@ -683,7 +683,7 @@ class LibrePICODETModel(nn.Module):
+             strides=(8, 16, 32, 64),
+             share_cls_reg=True,
+             use_depthwise=True,
+-            act="hswish",
++            act="swish",
+         )
+ 
+         self._init_backbone_neck()

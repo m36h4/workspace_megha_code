@@ -1,0 +1,132 @@
+# LibreYOLO Tests
+
+## Structure
+
+```
+tests/
+├── conftest.py                          # Markers (e2e, unit)
+├── unit/                                # Fast, no GPU needed
+│   ├── test_coco_validation.py          # COCO evaluation with mock data
+│   ├── test_export.py                   # Export logic unit tests
+│   ├── test_export_ncnn.py              # ncnn export unit tests
+│   ├── test_factory.py                  # LibreYOLO() factory tests
+│   ├── test_image_loader.py             # Image format handling
+│   ├── test_results.py                  # Results class tests
+│   ├── test_yolo9_layers.py              # YOLOv9 layer forward passes
+│   └── test_yolo_coco_api.py            # COCO format conversion
+└── e2e/                                 # End-to-end tests (GPU recommended)
+    ├── conftest.py                      # Fixtures, helpers, RF5 infra, export helpers
+    ├── configs/                         # Training config YAMLs (yolox, yolo9, rfdetr)
+    ├── test_ncnn.py                     # ncnn export + inference
+    ├── test_mnn.py                      # MNN flagship export + inference
+    ├── test_onnx.py                     # ONNX export + inference
+    ├── test_openvino.py                 # OpenVINO export + inference
+    ├── test_rf1_training.py             # All-models training test (marbles dataset)
+    ├── test_rf5_training.py             # RF5 training validation (CLI tool)
+    ├── test_tensorrt.py                 # TensorRT export + inference
+    ├── test_torchscript.py              # TorchScript export
+    └── test_val_coco128.py              # Validation sanity check (all 15 pretrained models)
+```
+
+## Running Tests
+
+### Unit Tests (Fast, CPU)
+
+```bash
+make test_pr_gate
+
+# Direct equivalent
+LIBREYOLO_PR_GATE=1 uv run --no-sync pytest tests/unit/ -m "unit and not external_data and not network" -v
+
+# Run all unit-marked tests, including opt-in external-data tests
+uv run --no-sync pytest tests/unit/ -v
+
+# Run specific test
+uv run --no-sync pytest tests/unit/test_yolo9_layers.py -v
+```
+
+### E2E Tests (Export + Training)
+
+`make test_e2e` runs all e2e tests (export, training, validation) with each test
+file in its own process to avoid CUDA driver state corruption between files.
+
+```bash
+# All e2e tests (recommended)
+make test_e2e
+
+# Marker-driven subsets
+pytest tests/e2e/ -v -m "e2e and onnx"
+pytest tests/e2e/ -v -m "e2e and torchscript and yolonas"
+pytest tests/e2e/ -v -m "e2e and yolo9 and not ncnn"
+pytest tests/e2e/ -v -m "e2e and not extended_backend"
+
+# Same marker filtering through the Makefile runner
+make test_e2e MARKERS='e2e and onnx'
+make test_e2e MARKERS='e2e and (onnx or torchscript) and not ncnn'
+make test_e2e MARKERS='e2e and not extended_backend'
+make test_e2e MARKER='e2e and not extended_backend' FROM=rf1_training
+make test_e2e MARKERS='e2e and dfine' FROM=test_rf1_training.py
+
+# MARKER= and MARKERS= are equivalent
+make test_e2e MARKER='e2e and yolo9'
+
+# Individual test files
+pytest tests/e2e/test_onnx.py -v        # ONNX export + inference
+pytest tests/e2e/test_tensorrt.py -v     # TensorRT (requires CUDA + TensorRT)
+pytest tests/e2e/test_openvino.py -v     # OpenVINO
+pytest tests/e2e/test_ncnn.py -v         # ncnn
+pytest tests/e2e/test_rf1_training.py -v # RF1: all 15 models, 10 epochs (marbles)
+
+# Quick tests only (smallest models)
+pytest tests/e2e/ -v -k "quick" --ignore=tests/e2e/test_rf5_training.py
+
+# RF5: config-driven benchmark (standalone CLI)
+python -m tests.e2e.test_rf5_training --config yolox.yaml --size nano
+python -m tests.e2e.test_rf5_training --list-configs
+```
+
+### Useful Markers
+
+- Scheduling groups: `supported_backend`, `extended_backend`, `export_backend`
+- Backends: `onnx`, `torchscript`, `tensorrt`, `trt`, `openvino`, `mnn`, `ncnn`
+- Model families: `yolox`, `yolo9`, `yolonas`, `rfdetr`, `dfine`, `rtdetr`
+- Suites: `rf1`, `rf5`, `slow`
+
+## Export Backend Support
+
+| Backend | Status | Marker | Release guidance |
+|---------|--------|--------|------------------|
+| ONNX | Supported | `supported_backend`, `onnx` | Keep in full release validation. |
+| TorchScript | Extended schedule | `extended_backend`, `torchscript` | Optional release coverage. |
+| TensorRT | Extended schedule | `extended_backend`, `tensorrt`, `trt` | Optional release coverage. |
+| OpenVINO | Extended schedule | `extended_backend`, `openvino` | Optional release coverage. |
+| MNN | Supported | `supported_backend`, `mnn` | Flagship CPU parity coverage. |
+| NCNN | Extended schedule | `extended_backend`, `ncnn` | Exclude by default if turnaround matters. |
+
+If you want "everything except extended export backends", run:
+
+```bash
+make test_e2e MARKERS='e2e and not rf5 and not extended_backend'
+```
+
+That keeps training, validation, CLI, video, tracking, and ONNX coverage while dropping TorchScript, TensorRT, OpenVINO, and NCNN.
+
+## RF5 - Training Validation Suite
+
+RF5 is a minimal subset of Roboflow100 designed to quickly verify training code works:
+
+| Dataset | Classes | Train | Purpose |
+|---------|---------|-------|---------|
+| bacteria-ptywi | 1 | 30 | Tiny dataset, tiny objects, dense |
+| circuit-elements | 45 | 672 | Many classes, extremely dense |
+| aquarium-qlnqy | 7 | 448 | Balanced baseline |
+| aerial-cows | 1 | 1084 | Small objects, aerial imagery |
+| road-signs-6ih4y | 21 | 1376 | Large objects, sparse |
+
+**Total: ~3,600 training images** (vs ~180k for full RF100)
+
+### When to Run
+
+- **Unit tests**: Always, before any commit
+- **E2E tests** (`make test_e2e`): When modifying export, training, or model code
+- **RF5 training**: Before merging significant training changes

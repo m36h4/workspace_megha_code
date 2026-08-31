@@ -1,0 +1,14 @@
+# Edit the paths below to match your actual dataset location
+path: dataset        # root dir
+train: images/train           # relative to 'path'
+val: images/val                # relative to 'path'
+
+# Class names, in the SAME order as classes.txt written by convert_to_yolo.py
+# (that file was sorted alphabetically -- copy it here in the same order,
+#  id 0 = first line, id 1 = second line, etc.)
+names:
+  0: basketball
+  1: volleyball
+  # 1: player
+  # 2: goal
+  # ... add every class from your classes.txt, in order
