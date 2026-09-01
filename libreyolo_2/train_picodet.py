@@ -100,7 +100,32 @@ def main():
 
     print("\nTraining finished.")
     print(results)
+import matplotlib.pyplot as plt
 
+# ...
+
+print("\nTraining finished.")
+print(results)
+
+# ---- Loss curve ----
+losses = results.get("epoch_losses", [])
+
+if losses:
+    plt.figure(figsize=(8, 5))
+    plt.plot(range(1, len(losses) + 1), losses)
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
+    plt.title("PicoDet Training Loss")
+    plt.grid(True)
+    plt.tight_layout()
+
+    loss_path = f"{args.project}/{args.name}/loss_curve.png"
+    plt.savefig(loss_path, dpi=200)
+    plt.close()
+
+    print(f"Loss curve saved to: {loss_path}")
+else:
+    print("No epoch_losses found in training results.")
 
 if __name__ == "__main__":
     main()
