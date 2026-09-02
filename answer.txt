@@ -1,0 +1,26 @@
+Hi Ohata-san, sharing the updated answers based on our current understanding of the PicoDet ONNX:
+
+1. Current output classes
+The smoke test was run with 2 classes: basketball and volleyball for 2 epochs. So the current model is a 2-class model, not 1-class or 80-class.
+
+
+2. What happens after the ONNX part? Is it mainly NMS?
+There is no NMS in the ONNX graph. The ONNX output already contains the decoded bounding boxes and class scores.
+The post-processing after ONNX includes confidence filtering, class selection, and NMS. We are currently checking the complete post-processing flow and will share the details once confirmed.
+
+
+3. Is this the correct URL for the PicoDet code?
+No. For this implementation, we used LibreYOLO. LibreYOLO's PicoDet port follows the Bo396543018/Picodet_Pytorch implementation.
+
+
+4. Why did the ONNX output shape change from (1, 3190, 4) to (1, 3190, 6)?
+The earlier (1, 3190, 4) output contained only the 4 bounding-box coordinates (x1, y1, x2, y2).
+The current (1, 3190, 6) output additionally includes the 2 class scores for basketball and volleyball. Therefore, the 6 values are: x1, y1, x2, y2, basketball_score, volleyball_score.
+This change is related to the exported output definition, rather than simply the image-size change.
+
+
+5. Target speed
+The current inference time is around 3.82 ms, while the target is around 2.0–2.5 ms. We will work on model optimization to achieve the target speed.
+
+
+
