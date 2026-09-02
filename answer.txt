@@ -22,5 +22,15 @@ This change is related to the exported output definition, rather than simply the
 5. Target speed
 The current inference time is around 3.82 ms, while the target is around 2.0–2.5 ms. We will work on model optimization to achieve the target speed.
 
+Hi Ohata-san,
 
+**1. Output classes** – Currently 2 classes, not 1 (ball) or 80. Worth confirming whether that's expected for this checkpoint, or if it should be trimmed to 1 class for the ball-only use case.
+
+**2. What happens after the ONNX part / is it mainly NMS?** – NMS is intentionally not in this graph (confirmed — no NMS op present), per the earlier decision to handle it later due to hardware constraints. The graph does handle DFL decode and box decode internally (raw head outputs → x1,y1,x2,y2), and it also outputs 2 class scores per anchor alongside the box — that's why the output is `[x1,y1,x2,y2,score_class0,score_class1]` (6 values), unrelated to NMS. So what's needed outside the ONNX model, before NMS is added later, is just confidence thresholding on those scores.
+
+**3. GitHub link correct?** – Structurally consistent with a PyTorch PicoDet implementation (matches the LibreYOLO port mentioned), but worth confirming it's the exact repo used, since authorship/version can't be verified from the ONNX file alone.
+
+**4. Shape change (1,3190,4) → (1,3190,6)** – Not caused by the image size change. It's 4 (box coords only) vs 6 (box coords + 2 class scores concatenated). Since the current smoke-test exports are all 6, the earlier `4`-shape export was likely from a version where scores weren't concatenated into the output yet (or class count/head config was different) — tied to where this came from in the port/training, not input resolution.
+
+**5. Target speed 2.0–2.5ms** – No blocker seen from the model graph itself; happy to help profile once NMS and final class count are locked in, since both will affect real end-to-end latency.
 
