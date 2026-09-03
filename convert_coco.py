@@ -1,38 +1,63 @@
 import json
 import random
 import shutil
-import csv
 from pathlib import Path
-from collections import Counter
-
-from PIL import Image, ImageOps
+from PIL import Image
 
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
+# CHANGE THIS
 SOURCE_ROOT = Path("/home/eng_megha/balldataset")
 
-OUTPUT_ROOT = Path("/home/eng_megha/balldataset_coco")
+# Main output directory
+OUTPUT_ROOT = Path("/home/eng_megha/balldataset_processed")
 
 
-# ONLY these four
-SELECTED_CASES = [
+# ============================================================
+# DATASET CASES
+# ============================================================
+
+# These cases participate in 70/20/10 split
+SPLIT_CASES = [
     "AI_train_caseB",
     "basic_train_caseA",
     "cc0_train_caseB",
     "match_train_caseA",
 ]
 
+# This case is ONLY converted to COCO.
+# It is NOT used for train/val/test.
+EVAL_CASE = "basic_eval_caseA"
 
-# Explicitly ignored
+
+# Cases whose original annotations are XYXY
+XYXY_CASES = {
+    "AI_train_caseB",
+    "basic_train_caseA",
+    "basic_eval_caseA",
+}
+
+# These are already XYWH
+XYWH_CASES = {
+    "cc0_train_caseB",
+    "match_train_caseA",
+}
+
+
+# Folders that must never be used
 EXCLUDED_FOLDERS = {
     "aug",
     "other",
     "volleyball",
 }
 
+
+# ============================================================
+# SPLIT
+# ============================================================
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.20
@@ -42,41 +67,8 @@ RANDOM_SEED = 42
 
 
 # ============================================================
-# SOURCE RECT FORMAT
+# IMAGE EXTENSIONS
 # ============================================================
-#
-# IMPORTANT:
-#
-# We are treating your source annotation as:
-#
-#       [x1, y1, x2, y2]
-#
-# NOT:
-#
-#       [x, y, width, height]
-#
-# ============================================================
-
-
-SOURCE_FORMAT = "xyxy"
-
-
-# ============================================================
-# IMAGE ORIENTATION
-# ============================================================
-#
-# "exif" means:
-#
-#   - read the image EXIF orientation
-#   - physically correct the orientation
-#   - transform the bounding box accordingly
-#
-# This is much safer than guessing 90/180/270 from a bbox.
-#
-# ============================================================
-
-USE_EXIF_ORIENTATION = True
-
 
 IMAGE_EXTENSIONS = {
     ".jpg",
@@ -101,67 +93,256 @@ CATEGORIES = [
 
 
 # ============================================================
-# EXCLUDED PATH
+# CHECK CONFIGURATION
+# ============================================================
+
+assert abs(
+    TRAIN_RATIO + VAL_RATIO + TEST_RATIO - 1.0
+) < 1e-6
+
+
+# ============================================================
+# HELPER FUNCTIONS
 # ============================================================
 
 def is_excluded(path):
+    """
+    Returns True if the path contains one of the folders
+    that should be ignored.
+    """
 
-    for part in path.parts:
+    return any(
+        part.lower() in EXCLUDED_FOLDERS
+        for part in path.parts
+    )
 
-        if part.lower() in EXCLUDED_FOLDERS:
-            return True
 
-    return False
+def find_imgs_directories(case_root):
+    """
+    Find every imgs directory under a case.
+    """
+
+    return [
+        p
+        for p in case_root.rglob("imgs")
+        if p.is_dir() and not is_excluded(p)
+    ]
+
+
+def convert_xyxy_to_xywh(rect):
+    """
+    Convert:
+
+        [x1, y1, x2, y2]
+
+    to:
+
+        [x, y, width, height]
+    """
+
+    if not isinstance(rect, list) or len(rect) != 4:
+        raise ValueError(
+            f"Invalid rect: {rect}"
+        )
+
+    x1, y1, x2, y2 = rect
+
+    width = x2 - x1
+    height = y2 - y1
+
+    if width < 0 or height < 0:
+        raise ValueError(
+            f"Invalid XYXY box: {rect}"
+        )
+
+    return [
+        x1,
+        y1,
+        width,
+        height,
+    ]
+
+
+def normalize_annotation(
+    annotation,
+    annotation_format
+):
+    """
+    Convert an annotation to the common XYWH format.
+
+    Only the 'rect' field is changed.
+
+    Everything else is preserved.
+    """
+
+    annotation = json.loads(
+        json.dumps(annotation)
+    )
+
+    data = annotation.get("data", {})
+
+    balls = data.get("ball", [])
+
+    for ball in balls:
+
+        entire = ball.get("entire", {})
+
+        rect = entire.get("rect")
+
+        if rect is None:
+            continue
+
+        if annotation_format == "xyxy":
+
+            entire["rect"] = convert_xyxy_to_xywh(rect)
+
+        elif annotation_format == "xywh":
+
+            # Already correct.
+            entire["rect"] = rect
+
+        else:
+            raise ValueError(
+                f"Unknown annotation format: "
+                f"{annotation_format}"
+            )
+
+    return annotation
+
+
+def get_annotation_format(case_name):
+    """
+    Return the known format for each case.
+    """
+
+    if case_name in XYXY_CASES:
+        return "xyxy"
+
+    if case_name in XYWH_CASES:
+        return "xywh"
+
+    raise ValueError(
+        f"Annotation format not defined for: {case_name}"
+    )
+
+
+def get_unique_image_name(
+    case_name,
+    imgs_dir,
+    image_name
+):
+    """
+    Prevent duplicate image names.
+
+    Example:
+
+        AI_train_caseB_basketball_image1.jpg
+
+    """
+
+    # Get the sport/folder immediately above imgs
+    relative_parent = imgs_dir.parent.name
+
+    return (
+        f"{case_name}_"
+        f"{relative_parent}_"
+        f"{image_name}"
+    )
 
 
 # ============================================================
-# FIND IMAGE / JSON PAIRS
+# CREATE UPDATED LABELS
 # ============================================================
 
-def find_pairs():
+def create_updated_labels(case_names):
+    """
+    Create a clean updated_labels directory.
 
-    pairs = []
+    XYXY -> XYWH
 
-    for case_name in SELECTED_CASES:
+    XYWH -> copied unchanged
+
+    Original labels are NEVER modified.
+    """
+
+    print("\n")
+    print("=" * 70)
+    print("STEP 1: CREATING UPDATED LABELS")
+    print("=" * 70)
+
+    updated_root = OUTPUT_ROOT / "updated_labels"
+
+    updated_root.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    all_pairs = []
+
+    for case_name in case_names:
 
         case_root = SOURCE_ROOT / case_name
 
         if not case_root.exists():
 
             print(
-                f"[WARNING] Missing:"
-                f" {case_root}"
+                f"[WARNING] Case not found: "
+                f"{case_root}"
             )
 
             continue
 
-        print(
-            f"Scanning: {case_name}"
+        annotation_format = get_annotation_format(
+            case_name
         )
 
-        for imgs_dir in case_root.rglob("imgs"):
+        print(
+            f"\n{case_name} "
+            f"[{annotation_format.upper()}]"
+        )
 
-            if not imgs_dir.is_dir():
-                continue
+        imgs_dirs = find_imgs_directories(
+            case_root
+        )
 
-            if is_excluded(imgs_dir):
-                continue
+        for imgs_dir in imgs_dirs:
 
             labels_dir = (
-                imgs_dir.parent /
-                "labels"
+                imgs_dir.parent / "labels"
             )
 
             if not labels_dir.exists():
 
                 print(
-                    f"[WARNING] No labels:"
-                    f" {labels_dir}"
+                    f"  [WARNING] Labels not found: "
+                    f"{labels_dir}"
                 )
 
                 continue
 
-            for image_path in imgs_dir.iterdir():
+            # ------------------------------------------------
+            # Preserve directory structure
+            # ------------------------------------------------
+
+            relative_case_path = (
+                imgs_dir.parent.relative_to(case_root)
+            )
+
+            output_labels_dir = (
+                updated_root /
+                case_name /
+                relative_case_path /
+                "labels"
+            )
+
+            output_labels_dir.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            for image_path in sorted(
+                imgs_dir.iterdir()
+            ):
 
                 if not image_path.is_file():
                     continue
@@ -172,806 +353,333 @@ def find_pairs():
                 ):
                     continue
 
-                json_path = (
+                label_path = (
                     labels_dir /
                     f"{image_path.stem}.json"
                 )
 
-                if not json_path.exists():
+                if not label_path.exists():
 
                     print(
-                        f"[WARNING] Missing JSON:"
-                        f" {image_path}"
+                        f"  [MISSING LABEL] "
+                        f"{image_path}"
                     )
 
                     continue
 
-                pairs.append(
-                    {
-                        "image": image_path,
-                        "json": json_path,
-                        "case": case_name,
-                    }
+                # ------------------------------------------------
+                # Read original annotation
+                # ------------------------------------------------
+
+                try:
+
+                    with open(
+                        label_path,
+                        "r",
+                        encoding="utf-8"
+                    ) as f:
+
+                        annotation = json.load(f)
+
+                except Exception as e:
+
+                    print(
+                        f"  [ERROR] "
+                        f"{label_path}: {e}"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # Convert XYXY -> XYWH
+                # ------------------------------------------------
+
+                try:
+
+                    updated_annotation = (
+                        normalize_annotation(
+                            annotation,
+                            annotation_format
+                        )
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"  [ERROR] "
+                        f"{label_path}: {e}"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # Save updated label
+                # ------------------------------------------------
+
+                output_label_path = (
+                    output_labels_dir /
+                    label_path.name
                 )
 
-    return pairs
+                with open(
+                    output_label_path,
+                    "w",
+                    encoding="utf-8"
+                ) as f:
 
+                    json.dump(
+                        updated_annotation,
+                        f,
+                        indent=2
+                    )
 
-# ============================================================
-# LOAD JSON
-# ============================================================
+                all_pairs.append({
+                    "case": case_name,
+                    "image": image_path,
+                    "updated_label": output_label_path,
+                    "imgs_dir": imgs_dir,
+                })
 
-def load_json(path):
-
-    with open(
-        path,
-        "r",
-        encoding="utf-8"
-    ) as f:
-
-        return json.load(f)
-
-
-# ============================================================
-# GET IMAGE ORIENTATION
-# ============================================================
-
-def get_exif_orientation(image):
-
-    try:
-
-        exif = image.getexif()
-
-        # EXIF orientation tag = 274
-
-        return exif.get(
-            274,
-            1
-        )
-
-    except Exception:
-
-        return 1
-
-
-# ============================================================
-# CORRECT IMAGE ORIENTATION
-# ============================================================
-
-def correct_image_orientation(image):
-
-    """
-    PIL's ImageOps.exif_transpose physically rotates/flips
-    the image according to EXIF orientation.
-
-    The returned image is therefore in normal visual
-    orientation.
-    """
-
-    if not USE_EXIF_ORIENTATION:
-
-        return image
-
-    return ImageOps.exif_transpose(
-        image
+    print(
+        f"\nTotal normalized image-label pairs: "
+        f"{len(all_pairs)}"
     )
 
-
-# ============================================================
-# TRANSFORM XYXY ACCORDING TO EXIF
-# ============================================================
-
-def transform_bbox_exif(
-    bbox,
-    width,
-    height,
-    orientation,
-):
-    """
-    Transform a bbox according to EXIF orientation.
-
-    Input bbox:
-        [x1, y1, x2, y2]
-
-    Coordinates are assumed to belong to the raw image.
-
-    Output bbox belongs to the EXIF-corrected image.
-    """
-
-    x1, y1, x2, y2 = bbox
-
-    corners = [
-        (x1, y1),
-        (x2, y1),
-        (x2, y2),
-        (x1, y2),
-    ]
-
-    transformed = []
-
-    for x, y in corners:
-
-        # ----------------------------------------------------
-        # EXIF 1
-        # Normal
-        # ----------------------------------------------------
-
-        if orientation == 1:
-
-            nx = x
-            ny = y
-
-        # ----------------------------------------------------
-        # EXIF 2
-        # Mirror horizontal
-        # ----------------------------------------------------
-
-        elif orientation == 2:
-
-            nx = width - x
-            ny = y
-
-        # ----------------------------------------------------
-        # EXIF 3
-        # Rotate 180
-        # ----------------------------------------------------
-
-        elif orientation == 3:
-
-            nx = width - x
-            ny = height - y
-
-        # ----------------------------------------------------
-        # EXIF 4
-        # Mirror vertical
-        # ----------------------------------------------------
-
-        elif orientation == 4:
-
-            nx = x
-            ny = height - y
-
-        # ----------------------------------------------------
-        # EXIF 5
-        # Mirror horizontal + rotate 270 CW
-        # ----------------------------------------------------
-
-        elif orientation == 5:
-
-            nx = y
-            ny = x
-
-        # ----------------------------------------------------
-        # EXIF 6
-        # Rotate 90 CW
-        # ----------------------------------------------------
-
-        elif orientation == 6:
-
-            nx = height - y
-            ny = x
-
-        # ----------------------------------------------------
-        # EXIF 7
-        # Mirror horizontal + rotate 90 CW
-        # ----------------------------------------------------
-
-        elif orientation == 7:
-
-            nx = height - y
-            ny = width - x
-
-        # ----------------------------------------------------
-        # EXIF 8
-        # Rotate 270 CW
-        # ----------------------------------------------------
-
-        elif orientation == 8:
-
-            nx = y
-            ny = width - x
-
-        else:
-
-            nx = x
-            ny = y
-
-        transformed.append(
-            (nx, ny)
-        )
-
-    xs = [
-        p[0]
-        for p in transformed
-    ]
-
-    ys = [
-        p[1]
-        for p in transformed
-    ]
-
-    return [
-        min(xs),
-        min(ys),
-        max(xs),
-        max(ys),
-    ]
-
-
-# ============================================================
-# NORMALIZE BOX
-# ============================================================
-
-def normalize_xyxy(bbox):
-
-    x1, y1, x2, y2 = bbox
-
-    return [
-        min(x1, x2),
-        min(y1, y2),
-        max(x1, x2),
-        max(y1, y2),
-    ]
-
-
-# ============================================================
-# CLIP BOX TO IMAGE
-# ============================================================
-
-def clip_bbox(
-    bbox,
-    width,
-    height,
-):
-    """
-    Keep a box inside image boundaries.
-
-    This is important because some annotations can touch
-    or slightly exceed image boundaries.
-    """
-
-    x1, y1, x2, y2 = bbox
-
-    x1 = max(
-        0,
-        min(x1, width)
+    print(
+        f"Updated labels saved to:\n"
+        f"{updated_root}"
     )
 
-    y1 = max(
-        0,
-        min(y1, height)
-    )
-
-    x2 = max(
-        0,
-        min(x2, width)
-    )
-
-    y2 = max(
-        0,
-        min(y2, height)
-    )
-
-    return [
-        x1,
-        y1,
-        x2,
-        y2,
-    ]
+    return all_pairs
 
 
 # ============================================================
-# XYXY -> COCO
+# CREATE COCO DATASET
 # ============================================================
 
-def xyxy_to_coco(bbox):
-
-    x1, y1, x2, y2 = bbox
-
-    width = x2 - x1
-    height = y2 - y1
-
-    return [
-        float(x1),
-        float(y1),
-        float(width),
-        float(height),
-    ]
-
-
-# ============================================================
-# PROCESS ONE IMAGE
-# ============================================================
-
-def process_image(
-    item,
-    diagnostics,
-):
-
-    image_path = item["image"]
-    json_path = item["json"]
-
-    annotation = load_json(
-        json_path
-    )
-
-    # --------------------------------------------------------
-    # Open original image
-    # --------------------------------------------------------
-
-    with Image.open(
-        image_path
-    ) as original:
-
-        raw_width, raw_height = (
-            original.size
-        )
-
-        orientation = (
-            get_exif_orientation(
-                original
-            )
-        )
-
-        # Correct visual orientation
-        corrected = (
-            correct_image_orientation(
-                original
-            )
-        )
-
-        corrected_width, corrected_height = (
-            corrected.size
-        )
-
-    # --------------------------------------------------------
-    # JSON dimensions
-    # --------------------------------------------------------
-
-    dimensions = annotation.get(
-        "dimensions"
-    )
-
-    if (
-        isinstance(dimensions, list)
-        and len(dimensions) == 2
-    ):
-
-        json_dim_1 = int(
-            dimensions[0]
-        )
-
-        json_dim_2 = int(
-            dimensions[1]
-        )
-
-    else:
-
-        json_dim_1 = None
-        json_dim_2 = None
-
-    # --------------------------------------------------------
-    # Balls
-    # --------------------------------------------------------
-
-    balls = (
-        annotation
-        .get("data", {})
-        .get("ball", [])
-    )
-
-    coco_boxes = []
-
-    for ball_index, ball in enumerate(
-        balls
-    ):
-
-        try:
-
-            rect = (
-                ball
-                ["entire"]
-                ["rect"]
-            )
-
-        except (
-            KeyError,
-            TypeError,
-        ):
-
-            diagnostics.append(
-                {
-                    "image": str(image_path),
-                    "json": str(json_path),
-                    "ball_index": ball_index,
-                    "rect": "",
-                    "raw_size":
-                        f"{raw_width}x{raw_height}",
-                    "corrected_size":
-                        f"{corrected_width}x{corrected_height}",
-                    "exif_orientation":
-                        orientation,
-                    "status":
-                        "MISSING_RECT",
-                }
-            )
-
-            continue
-
-        if (
-            not isinstance(rect, list)
-            or len(rect) != 4
-        ):
-
-            diagnostics.append(
-                {
-                    "image": str(image_path),
-                    "json": str(json_path),
-                    "ball_index": ball_index,
-                    "rect": str(rect),
-                    "raw_size":
-                        f"{raw_width}x{raw_height}",
-                    "corrected_size":
-                        f"{corrected_width}x{corrected_height}",
-                    "exif_orientation":
-                        orientation,
-                    "status":
-                        "BAD_RECT",
-                }
-            )
-
-            continue
-
-        rect = [
-            float(v)
-            for v in rect
-        ]
-
-        # ----------------------------------------------------
-        # SOURCE XYXY
-        # ----------------------------------------------------
-
-        source_bbox = normalize_xyxy(
-            rect
-        )
-
-        # ----------------------------------------------------
-        # Transform EXIF orientation
-        # ----------------------------------------------------
-
-        if (
-            USE_EXIF_ORIENTATION
-            and orientation != 1
-        ):
-
-            bbox = transform_bbox_exif(
-                source_bbox,
-                raw_width,
-                raw_height,
-                orientation,
-            )
-
-        else:
-
-            bbox = source_bbox
-
-        # ----------------------------------------------------
-        # Normalize again
-        # ----------------------------------------------------
-
-        bbox = normalize_xyxy(
-            bbox
-        )
-
-        # ----------------------------------------------------
-        # Clip
-        # ----------------------------------------------------
-
-        bbox = clip_bbox(
-            bbox,
-            corrected_width,
-            corrected_height,
-        )
-
-        # ----------------------------------------------------
-        # Check size
-        # ----------------------------------------------------
-
-        x1, y1, x2, y2 = bbox
-
-        box_width = (
-            x2 - x1
-        )
-
-        box_height = (
-            y2 - y1
-        )
-
-        # ----------------------------------------------------
-        # Reject only genuinely zero/negative boxes
-        # ----------------------------------------------------
-
-        if (
-            box_width <= 0
-            or
-            box_height <= 0
-        ):
-
-            diagnostics.append(
-                {
-                    "image": str(image_path),
-                    "json": str(json_path),
-                    "ball_index": ball_index,
-                    "rect": str(rect),
-                    "raw_size":
-                        f"{raw_width}x{raw_height}",
-                    "corrected_size":
-                        f"{corrected_width}x{corrected_height}",
-                    "exif_orientation":
-                        orientation,
-                    "status":
-                        "INVALID_AFTER_TRANSFORM",
-                }
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # Convert to COCO
-        # ----------------------------------------------------
-
-        coco_bbox = xyxy_to_coco(
-            bbox
-        )
-
-        coco_boxes.append(
-            coco_bbox
-        )
-
-        diagnostics.append(
-            {
-                "image": str(image_path),
-                "json": str(json_path),
-                "ball_index": ball_index,
-                "rect": str(rect),
-                "raw_size":
-                    f"{raw_width}x{raw_height}",
-                "corrected_size":
-                    f"{corrected_width}x{corrected_height}",
-                "exif_orientation":
-                    orientation,
-                "status":
-                    "VALID",
-            }
-        )
-
-    return (
-        corrected_width,
-        corrected_height,
-        orientation,
-        coco_boxes,
-    )
-
-
-# ============================================================
-# OUTPUT FILENAME
-# ============================================================
-
-def make_filename(item):
-
-    image_path = item["image"]
-
-    case_name = item["case"]
-
-    category = (
-        image_path
-        .parent
-        .parent
-        .name
-    )
-
-    return (
-        f"{case_name}_"
-        f"{category}_"
-        f"{image_path.name}"
-    )
-
-
-# ============================================================
-# CREATE SPLIT
-# ============================================================
-
-def create_split(
-    items,
+def create_coco(
+    pairs,
     split_name,
-    diagnostics,
+    output_root,
 ):
+    """
+    Convert normalized XYWH annotations into COCO.
 
-    image_dir = (
-        OUTPUT_ROOT /
+    The input labels MUST already be XYWH.
+    """
+
+    print("\n")
+    print("=" * 70)
+    print(f"COCO CONVERSION: {split_name.upper()}")
+    print("=" * 70)
+
+    images_output_dir = (
+        output_root /
         "images" /
         split_name
     )
 
-    image_dir.mkdir(
+    annotations_output_dir = (
+        output_root /
+        "annotations"
+    )
+
+    images_output_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    annotations_output_dir.mkdir(
         parents=True,
         exist_ok=True
     )
 
     coco = {
-
         "info": {
-            "description":
-                "Ball Detection Dataset",
-            "version":
-                "1.0",
+            "description": "Ball Detection Dataset",
+            "version": "1.0",
         },
-
         "licenses": [],
-
         "images": [],
-
         "annotations": [],
-
-        "categories":
-            CATEGORIES,
+        "categories": CATEGORIES,
     }
 
-    image_id = 1
     annotation_id = 1
 
-    skipped = 0
+    for image_id, item in enumerate(
+        pairs,
+        start=1
+    ):
 
-    for item in items:
+        image_path = item["image"]
+        label_path = item["updated_label"]
+        case_name = item["case"]
+        imgs_dir = item["imgs_dir"]
+
+        # ----------------------------------------------------
+        # Read annotation
+        # ----------------------------------------------------
 
         try:
 
-            (
-                width,
-                height,
-                orientation,
-                boxes,
-            ) = process_image(
-                item,
-                diagnostics,
-            )
+            with open(
+                label_path,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                annotation_data = json.load(f)
 
         except Exception as e:
 
             print(
-                f"\n[ERROR]"
-                f"\n{item['image']}"
-                f"\n{e}"
+                f"[ERROR] Reading "
+                f"{label_path}: {e}"
             )
-
-            skipped += 1
 
             continue
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # If an image has zero annotations, we keep it only
-        # if you want negative/background images.
-        #
-        # For ball detection, we keep it here.
+        # Dimensions
         # ----------------------------------------------------
 
-        filename = make_filename(
-            item
+        dimensions = (
+            annotation_data.get("dimensions")
+        )
+
+        if (
+            dimensions is not None
+            and len(dimensions) == 2
+        ):
+
+            # Your format:
+            # [height, width]
+
+            height = int(dimensions[0])
+            width = int(dimensions[1])
+
+        else:
+
+            # Fallback to actual image
+            with Image.open(image_path) as im:
+
+                width, height = im.size
+
+        # ----------------------------------------------------
+        # Unique image filename
+        # ----------------------------------------------------
+
+        unique_name = get_unique_image_name(
+            case_name,
+            imgs_dir,
+            image_path.name
         )
 
         destination = (
-            image_dir /
-            filename
+            images_output_dir /
+            unique_name
+        )
+
+        shutil.copy2(
+            image_path,
+            destination
         )
 
         # ----------------------------------------------------
-        # Copy image
+        # COCO image
         # ----------------------------------------------------
 
-        try:
+        coco["images"].append({
+            "id": image_id,
+            "file_name": unique_name,
+            "width": width,
+            "height": height,
+        })
 
-            with Image.open(
-                item["image"]
-            ) as img:
+        # ----------------------------------------------------
+        # Ball annotations
+        # ----------------------------------------------------
 
-                if USE_EXIF_ORIENTATION:
+        data = annotation_data.get(
+            "data",
+            {}
+        )
 
-                    img = ImageOps.exif_transpose(
-                        img
-                    )
+        balls = data.get(
+            "ball",
+            []
+        )
 
-                # Save physically corrected image
-                #
-                # This removes the dependency on EXIF
-                # orientation during training.
+        for ball in balls:
 
-                img.save(
-                    destination,
-                    quality=95
+            entire = ball.get(
+                "entire",
+                {}
+            )
+
+            rect = entire.get(
+                "rect"
+            )
+
+            if rect is None:
+                continue
+
+            if len(rect) != 4:
+                print(
+                    f"[WARNING] Bad bbox: "
+                    f"{rect}"
+                )
+                continue
+
+            # IMPORTANT:
+            # At this point rect is already XYWH.
+
+            x, y, bbox_width, bbox_height = (
+                rect
+            )
+
+            # ------------------------------------------------
+            # Validate bbox
+            # ------------------------------------------------
+
+            if bbox_width <= 0 or bbox_height <= 0:
+
+                print(
+                    f"[WARNING] Invalid bbox "
+                    f"in {label_path}: {rect}"
                 )
 
-        except Exception as e:
+                continue
 
-            print(
-                f"\n[ERROR] Could not save:"
-                f"\n{item['image']}"
-                f"\n{e}"
-            )
+            # ------------------------------------------------
+            # COCO annotation
+            # ------------------------------------------------
 
-            skipped += 1
-
-            continue
-
-        # ----------------------------------------------------
-        # COCO IMAGE
-        # ----------------------------------------------------
-
-        coco["images"].append(
-            {
-                "id": image_id,
-                "file_name": filename,
-                "width": width,
-                "height": height,
-            }
-        )
-
-        # ----------------------------------------------------
-        # COCO BOXES
-        # ----------------------------------------------------
-
-        for bbox in boxes:
-
-            x, y, w, h = bbox
-
-            coco["annotations"].append(
-                {
-                    "id":
-                        annotation_id,
-
-                    "image_id":
-                        image_id,
-
-                    "category_id":
-                        1,
-
-                    "bbox":
-                        [
-                            x,
-                            y,
-                            w,
-                            h,
-                        ],
-
-                    "area":
-                        w * h,
-
-                    "iscrowd":
-                        0,
-                }
-            )
+            coco["annotations"].append({
+                "id": annotation_id,
+                "image_id": image_id,
+                "category_id": 1,
+                "bbox": [
+                    float(x),
+                    float(y),
+                    float(bbox_width),
+                    float(bbox_height),
+                ],
+                "area": float(
+                    bbox_width * bbox_height
+                ),
+                "iscrowd": 0,
+            })
 
             annotation_id += 1
 
-        image_id += 1
-
     # --------------------------------------------------------
-    # Save JSON
+    # Save COCO JSON
     # --------------------------------------------------------
-
-    annotation_dir = (
-        OUTPUT_ROOT /
-        "annotations"
-    )
-
-    annotation_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
 
     json_path = (
-        annotation_dir /
+        annotations_output_dir /
         f"instances_{split_name}.json"
     )
 
@@ -988,72 +696,21 @@ def create_split(
         )
 
     print(
-        f"\nCreated {split_name}:"
-    )
-
-    print(
-        f"  Images      : "
+        f"\nImages      : "
         f"{len(coco['images'])}"
     )
 
     print(
-        f"  Annotations : "
+        f"Annotations : "
         f"{len(coco['annotations'])}"
     )
 
     print(
-        f"  Skipped     : "
-        f"{skipped}"
-    )
-
-    print(
-        f"  JSON        : "
+        f"Saved       : "
         f"{json_path}"
     )
 
-
-# ============================================================
-# SAVE DIAGNOSTICS
-# ============================================================
-
-def save_diagnostics(rows):
-
-    output = (
-        OUTPUT_ROOT /
-        "bbox_diagnostics.csv"
-    )
-
-    fields = [
-        "image",
-        "json",
-        "ball_index",
-        "rect",
-        "raw_size",
-        "corrected_size",
-        "exif_orientation",
-        "status",
-    ]
-
-    with open(
-        output,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=fields
-        )
-
-        writer.writeheader()
-
-        writer.writerows(rows)
-
-    print(
-        f"\nDiagnostics:"
-        f"\n{output}"
-    )
+    return coco
 
 
 # ============================================================
@@ -1062,62 +719,53 @@ def save_diagnostics(rows):
 
 def main():
 
+    print("\n")
+    print("=" * 70)
+    print("BALL DATASET -> UPDATED LABELS -> COCO")
+    print("=" * 70)
+
     print(
-        "\n" +
-        "=" * 70
+        f"\nSource:\n{SOURCE_ROOT}"
     )
 
     print(
-        "COCO DATASET CONVERTER"
+        f"\nOutput:\n{OUTPUT_ROOT}"
     )
 
-    print(
-        "=" * 70
+    # ========================================================
+    # STEP 1
+    # Normalize labels
+    # ========================================================
+
+    # Split cases
+    split_pairs = create_updated_labels(
+        SPLIT_CASES
     )
 
-    print(
-        "\nIMPORTANT:"
+    # Evaluation case separately
+    eval_pairs = create_updated_labels(
+        [EVAL_CASE]
     )
 
-    print(
-        "Source rect = [x1, y1, x2, y2]"
-    )
+    # ========================================================
+    # STEP 2
+    # Split only the four training cases
+    # ========================================================
 
-    print(
-        "COCO bbox  = [x, y, width, height]"
-    )
-
-    print(
-        "EXIF orientation correction = ON"
-    )
-
-    # --------------------------------------------------------
-    # Find all data
-    # --------------------------------------------------------
-
-    pairs = find_pairs()
-
-    print(
-        f"\nImage/JSON pairs found:"
-        f" {len(pairs)}"
-    )
-
-    if not pairs:
-        return
-
-    # --------------------------------------------------------
-    # Random split
-    # --------------------------------------------------------
+    print("\n")
+    print("=" * 70)
+    print("STEP 2: TRAIN / VAL / TEST SPLIT")
+    print("=" * 70)
 
     random.seed(
         RANDOM_SEED
     )
 
     random.shuffle(
-        pairs
+        split_pairs
     )
 
-    total = len(pairs)
+    total = len(split_pairs)
 
     train_count = int(
         total * TRAIN_RATIO
@@ -1127,164 +775,138 @@ def main():
         total * VAL_RATIO
     )
 
-    train_items = pairs[
+    test_count = (
+        total -
+        train_count -
+        val_count
+    )
+
+    train_pairs = split_pairs[
         :train_count
     ]
 
-    val_items = pairs[
+    val_pairs = split_pairs[
         train_count:
         train_count + val_count
     ]
 
-    test_items = pairs[
+    test_pairs = split_pairs[
         train_count + val_count:
     ]
 
     print(
-        "\nSPLIT:"
+        f"\nTotal: {total}"
     )
 
     print(
-        f"Train: {len(train_items)}"
+        f"Train: {len(train_pairs)} "
+        f"({len(train_pairs) / total * 100:.2f}%)"
     )
 
     print(
-        f"Val  : {len(val_items)}"
+        f"Val  : {len(val_pairs)} "
+        f"({len(val_pairs) / total * 100:.2f}%)"
     )
 
     print(
-        f"Test : {len(test_items)}"
+        f"Test : {len(test_pairs)} "
+        f"({len(test_pairs) / total * 100:.2f}%)"
     )
 
-    # --------------------------------------------------------
-    # Delete old output
-    # --------------------------------------------------------
+    # ========================================================
+    # STEP 3
+    # COCO conversion for train/val/test
+    # ========================================================
 
-    if OUTPUT_ROOT.exists():
-
-        print(
-            f"\nOutput already exists:"
-            f"\n{OUTPUT_ROOT}"
-        )
-
-        answer = input(
-            "Delete it? [y/N]: "
-        ).strip().lower()
-
-        if answer != "y":
-
-            print(
-                "Stopped."
-            )
-
-            return
-
-        shutil.rmtree(
-            OUTPUT_ROOT
-        )
-
-    OUTPUT_ROOT.mkdir(
-        parents=True,
-        exist_ok=True
+    coco_split_root = (
+        OUTPUT_ROOT /
+        "coco_dataset"
     )
 
-    # --------------------------------------------------------
-    # Diagnostics
-    # --------------------------------------------------------
-
-    diagnostics = []
-
-    # --------------------------------------------------------
-    # Create datasets
-    # --------------------------------------------------------
-
-    create_split(
-        train_items,
+    create_coco(
+        train_pairs,
         "train",
-        diagnostics,
+        coco_split_root
     )
 
-    create_split(
-        val_items,
+    create_coco(
+        val_pairs,
         "val",
-        diagnostics,
+        coco_split_root
     )
 
-    create_split(
-        test_items,
+    create_coco(
+        test_pairs,
         "test",
-        diagnostics,
+        coco_split_root
     )
 
-    # --------------------------------------------------------
-    # Save diagnostics
-    # --------------------------------------------------------
+    # ========================================================
+    # STEP 4
+    # COCO conversion for evaluation
+    #
+    # IMPORTANT:
+    # eval is NOT included in the split.
+    # ========================================================
 
-    save_diagnostics(
-        diagnostics
+    coco_eval_root = (
+        OUTPUT_ROOT /
+        "coco_eval"
     )
 
-    # --------------------------------------------------------
-    # Statistics
-    # --------------------------------------------------------
-
-    counts = Counter(
-        row["status"]
-        for row in diagnostics
+    create_coco(
+        eval_pairs,
+        "eval",
+        coco_eval_root
     )
 
-    print(
-        "\n" +
-        "=" * 70
-    )
+    # ========================================================
+    # FINAL SUMMARY
+    # ========================================================
 
-    print(
-        "ANNOTATION SUMMARY"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    for status, count in counts.items():
-
-        print(
-            f"{status:30s}: {count}"
-        )
-
-    # --------------------------------------------------------
-    # Final
-    # --------------------------------------------------------
-
-    print(
-        "\n" +
-        "=" * 70
-    )
-
-    print(
-        "DONE"
-    )
-
-    print(
-        "=" * 70
-    )
+    print("\n")
+    print("=" * 70)
+    print("FINISHED")
+    print("=" * 70)
 
     print(
         f"""
 {OUTPUT_ROOT}/
 │
-├── images/
-│   ├── train/
-│   ├── val/
-│   └── test/
+├── updated_labels/
+│   ├── AI_train_caseB/
+│   ├── basic_train_caseA/
+│   ├── cc0_train_caseB/
+│   ├── match_train_caseA/
+│   └── basic_eval_caseB/
 │
-├── annotations/
-│   ├── instances_train.json
-│   ├── instances_val.json
-│   └── instances_test.json
+├── coco_dataset/
+│   ├── images/
+│   │   ├── train/
+│   │   ├── val/
+│   │   └── test/
+│   │
+│   └── annotations/
+│       ├── instances_train.json
+│       ├── instances_val.json
+│       └── instances_test.json
 │
-└── bbox_diagnostics.csv
+└── coco_eval/
+    ├── images/
+    │   └── eval/
+    │
+    └── annotations/
+        └── instances_eval.json
 """
+    )
+
+    print(
+        "\nIMPORTANT:"
+    )
+
+    print(
+        "basic_eval_caseB was NOT used "
+        "for train/val/test."
     )
 
 
