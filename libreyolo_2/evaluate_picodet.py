@@ -1,26 +1,25 @@
-from libreyolo.models.picodet.model import LibrePICODET
+from libreyolo import LibreYOLO
 
 MODEL = "runs/train/picodet_pretrained_320/weights/best.pt"
 DATA = "dataset.yaml"
 
-model = LibrePICODET(
-    size="s",
-    nb_classes=1,
-)
+model = LibreYOLO(MODEL)
 
-print("Loading:", MODEL)
+print("Model:", MODEL)
+print("Dataset:", DATA)
+print("Running validation...")
 
-# Load trained checkpoint
-model.load(MODEL)
-
-print("\nRunning validation...")
 results = model.val(
     data=DATA,
     imgsz=320,
     batch=32,
-    device="auto",
     workers=4,
+    device="auto",
+    split="val",
+    verbose=True,
 )
 
-print("\n========== VALIDATION RESULTS ==========")
-print(results)
+print("\n========== RESULTS ==========")
+
+for k, v in results.items():
+    print(f"{k}: {v}")
