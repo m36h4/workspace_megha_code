@@ -20,14 +20,14 @@ SOURCE_ROOT = Path("/home/eng_megha/balldataset")
 # ALL GENERATED DATA WILL GO HERE
 # ------------------------------------------------------------
 
-OUTPUT_ROOT = Path("/home/eng_megha/balldataset_processed")
+OUTPUT_ROOT = Path("/home/eng_megha/balldataset_coco")
 
 
 # ============================================================
 # DATASET CASES
 # ============================================================
 
-# These four cases are used for the 70/20/10 split
+# These four cases are used ONLY for the 70/20/10 split.
 SPLIT_CASES = [
     "AI_train_caseB",
     "basic_train_caseA",
@@ -36,9 +36,18 @@ SPLIT_CASES = [
 ]
 
 
-# This case is NOT used for the 70/20/10 split
-# It is converted separately and also added to merge_val.
-EVAL_CASE = "basic_eval_caseB"
+# ------------------------------------------------------------
+# EVALUATION CASE
+# ------------------------------------------------------------
+
+# This case is NOT used in the 70/20/10 split.
+#
+# It is:
+#
+# 1. Converted separately into coco_eval
+# 2. Added to merge_val together with the 20% validation set
+#
+EVAL_CASE = "basic_eval_caseA"
 
 
 # ============================================================
@@ -56,15 +65,17 @@ EVAL_CASE = "basic_eval_caseB"
 XYXY_CASES = {
     "AI_train_caseB",
     "basic_train_caseA",
-    "basic_eval_caseB",
+    "basic_eval_caseA",
 }
 
 
+# ------------------------------------------------------------
 # These cases already contain:
 #
 # [x, y, width, height]
 #
-# so they are copied without changing the bbox.
+# so the bbox is copied without changing it.
+# ------------------------------------------------------------
 
 XYWH_CASES = {
     "cc0_train_caseB",
@@ -95,6 +106,7 @@ TEST_RATIO = 0.10
 
 
 # Fixed seed means you get the same split every time.
+
 RANDOM_SEED = 42
 
 
@@ -150,7 +162,7 @@ def is_excluded(path):
     Check whether any directory in the path is one of
     the excluded folders.
 
-    For example:
+    Example:
 
         basic_train_caseA/volleyball/imgs
 
@@ -199,6 +211,8 @@ def find_imgs_directories(case_root):
                 imgs/
 
     All three imgs directories will be found.
+
+    Excluded directories are ignored.
     """
 
     imgs_dirs = []
@@ -266,7 +280,15 @@ def normalize_annotation(
     """
     Convert an annotation into the common XYWH format.
 
-    If the annotation is already XYWH, it is left unchanged.
+    XYXY:
+        [x1, y1, x2, y2]
+        ->
+        [x, y, width, height]
+
+    XYWH:
+        [x, y, width, height]
+        ->
+        unchanged
 
     The original JSON object is not modified.
     """
@@ -338,7 +360,7 @@ def get_unique_image_name(
 
         AI_train_caseB_basketball_image1.jpg
 
-        basic_eval_caseB_basketball_image1.jpg
+        basic_eval_caseA_basketball_image1.jpg
     """
 
     case_root = SOURCE_ROOT / case_name
@@ -375,6 +397,7 @@ def get_unique_image_name(
     )
 
     if prefix:
+
         return (
             f"{case_name}_"
             f"{prefix}_"
@@ -436,7 +459,7 @@ def create_updated_labels(case_names):
         if not case_root.exists():
 
             print(
-                f"\n[WARNING] Case not found:"
+                "\n[WARNING] Case not found:"
             )
 
             print(
@@ -492,8 +515,8 @@ def create_updated_labels(case_names):
             if not labels_dir.exists():
 
                 print(
-                    f"\n  [WARNING] Labels directory "
-                    f"not found:"
+                    "\n  [WARNING] Labels directory "
+                    "not found:"
                 )
 
                 print(
@@ -585,7 +608,7 @@ def create_updated_labels(case_names):
                 except Exception as e:
 
                     print(
-                        f"    [ERROR] Could not read:"
+                        "    [ERROR] Could not read:"
                     )
 
                     print(
@@ -614,8 +637,8 @@ def create_updated_labels(case_names):
                 except Exception as e:
 
                     print(
-                        f"    [ERROR] Could not "
-                        f"normalize:"
+                        "    [ERROR] Could not "
+                        "normalize:"
                     )
 
                     print(
@@ -673,7 +696,7 @@ def create_updated_labels(case_names):
     )
 
     print(
-        f"Updated labels saved at:"
+        "Updated labels saved at:"
     )
 
     print(
@@ -699,11 +722,17 @@ def create_coco(
 
     Parameters:
 
-        pairs       -> image/annotation pairs
-        dataset_name -> informational name
-        split_name  -> train / val / test / eval / merge_val
-        output_root -> destination root
+        pairs
+            image/annotation pairs
 
+        dataset_name
+            informational name
+
+        split_name
+            train / val / test / eval / merge_val
+
+        output_root
+            destination root
     """
 
     print()
@@ -807,7 +836,7 @@ def create_coco(
         except Exception as e:
 
             print(
-                f"[ERROR] Reading:"
+                "[ERROR] Reading:"
             )
 
             print(
@@ -876,8 +905,8 @@ def create_coco(
             except Exception as e:
 
                 print(
-                    f"[ERROR] Cannot determine "
-                    f"image size:"
+                    "[ERROR] Cannot determine "
+                    "image size:"
                 )
 
                 print(
@@ -923,7 +952,7 @@ def create_coco(
         except Exception as e:
 
             print(
-                f"[ERROR] Copying:"
+                "[ERROR] Copying:"
             )
 
             print(
@@ -944,7 +973,8 @@ def create_coco(
 
         coco["images"].append({
 
-            "id": image_id,
+            "id":
+                image_id,
 
             "file_name":
                 unique_name,
@@ -988,13 +1018,16 @@ def create_coco(
             if rect is None:
                 continue
 
-            if not isinstance(
-                rect,
-                list
-            ) or len(rect) != 4:
+            if (
+                not isinstance(
+                    rect,
+                    list
+                )
+                or len(rect) != 4
+            ):
 
                 print(
-                    f"[WARNING] Invalid bbox:"
+                    "[WARNING] Invalid bbox:"
                 )
 
                 print(
@@ -1044,8 +1077,8 @@ def create_coco(
             ):
 
                 print(
-                    f"[WARNING] Invalid "
-                    f"bbox dimensions:"
+                    "[WARNING] Invalid "
+                    "bbox dimensions:"
                 )
 
                 print(
@@ -1154,11 +1187,16 @@ def create_merge_val(
     """
     Create:
 
-        merge_val = normal 20% validation
-                    +
-                    basic_eval_caseB
+        merge_val =
+            normal 20% validation
+            +
+            basic_eval_caseA
 
-    This does NOT modify the normal val set.
+    IMPORTANT:
+
+        The normal val set is NOT changed.
+
+        basic_eval_caseA is added only to merge_val.
     """
 
     print()
@@ -1173,7 +1211,7 @@ def create_merge_val(
     )
 
     print(
-        f"basic_eval_caseB    : "
+        f"basic_eval_caseA    : "
         f"{len(eval_pairs)} images"
     )
 
@@ -1189,6 +1227,15 @@ def create_merge_val(
     print(
         f"merge_val total      : "
         f"{len(merge_pairs)} images"
+    )
+
+    # --------------------------------------------------------
+    # Print distribution
+    # --------------------------------------------------------
+
+    print_case_distribution(
+        merge_pairs,
+        "MERGE_VAL"
     )
 
     # --------------------------------------------------------
@@ -1254,7 +1301,7 @@ def main():
 
     print()
     print(
-        f"Source dataset:"
+        "Source dataset:"
     )
 
     print(
@@ -1263,7 +1310,7 @@ def main():
 
     print()
     print(
-        f"Output directory:"
+        "Output directory:"
     )
 
     print(
@@ -1339,7 +1386,7 @@ def main():
     # ========================================================
     # STEP 1B
     #
-    # Normalize basic_eval_caseB separately
+    # Normalize basic_eval_caseA separately
     # ========================================================
 
     eval_pairs = create_updated_labels(
@@ -1363,18 +1410,18 @@ def main():
 
         print()
         print(
-            "[WARNING] No basic_eval_caseB "
+            "[WARNING] No basic_eval_caseA "
             "image-label pairs were found."
         )
 
     # ========================================================
     # STEP 2
     #
-    # RANDOM SPLIT
+    # RANDOM 70 / 20 / 10 SPLIT
     #
     # IMPORTANT:
     #
-    # basic_eval_caseB is NOT included here.
+    # basic_eval_caseA is NOT included here.
     # ========================================================
 
     print()
@@ -1465,6 +1512,17 @@ def main():
         f"({len(test_pairs) / total * 100:.2f}%)"
     )
 
+    print()
+
+    print(
+        "NOTE:"
+    )
+
+    print(
+        "basic_eval_caseA is NOT included "
+        "in these three splits."
+    )
+
     print_case_distribution(
         train_pairs,
         "TRAIN"
@@ -1483,7 +1541,9 @@ def main():
     # ========================================================
     # STEP 3
     #
-    # COCO TRAIN / VAL / TEST
+    # CREATE NORMAL COCO TRAIN / VAL / TEST
+    #
+    # val contains ONLY the 20% split.
     # ========================================================
 
     coco_dataset_root = (
@@ -1523,6 +1583,8 @@ def main():
     # BASIC EVAL CASE
     #
     # Completely separate COCO dataset.
+    #
+    # Contains ONLY basic_eval_caseA.
     # ========================================================
 
     coco_eval_root = (
@@ -1549,7 +1611,11 @@ def main():
     #
     # MERGED VALIDATION
     #
-    # 20% validation + basic_eval_caseB
+    # 20% validation + basic_eval_caseA
+    #
+    # IMPORTANT:
+    #
+    # This does NOT modify coco_dataset/val.
     # ========================================================
 
     coco_merge_val_root = (
@@ -1591,7 +1657,7 @@ def main():
 │   ├── basic_train_caseA/
 │   ├── cc0_train_caseB/
 │   ├── match_train_caseA/
-│   └── basic_eval_caseB/
+│   └── basic_eval_caseA/
 │
 ├── coco_dataset/
 │   │
@@ -1632,6 +1698,7 @@ def main():
     )
 
     print()
+
     print(
         f"  Train     = "
         f"{len(train_pairs)} images"
@@ -1639,7 +1706,8 @@ def main():
 
     print(
         f"  Val       = "
-        f"{len(val_pairs)} images"
+        f"{len(val_pairs)} images "
+        f"(20% split ONLY)"
     )
 
     print(
@@ -1649,18 +1717,39 @@ def main():
 
     print(
         f"  Eval      = "
-        f"{len(eval_pairs)} images"
+        f"{len(eval_pairs)} images "
+        f"(basic_eval_caseA ONLY)"
     )
 
     print(
         f"  Merge Val = "
-        f"{len(val_pairs) + len(eval_pairs)} images"
+        f"{len(val_pairs) + len(eval_pairs)} images "
+        f"(20% val + basic_eval_caseA)"
     )
 
     print()
     print(
-        "basic_eval_caseB was NOT used "
+        "IMPORTANT:"
+    )
+
+    print(
+        "  basic_eval_caseA was NOT used "
         "in the 70/20/10 split."
+    )
+
+    print(
+        "  coco_dataset/val contains ONLY "
+        "the 20% validation split."
+    )
+
+    print(
+        "  coco_eval/eval contains ONLY "
+        "basic_eval_caseA."
+    )
+
+    print(
+        "  coco_merge_val/merge_val contains "
+        "20% validation + basic_eval_caseA."
     )
 
     print()
