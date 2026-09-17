@@ -1,7 +1,5 @@
-```python
 import argparse
 import json
-import random
 import shutil
 from pathlib import Path
 
@@ -9,37 +7,35 @@ from PIL import Image
 
 
 # ============================================================
-# GENERIC COCO DATASET CONVERTER
+# GENERIC COCO CONVERTER
 # ============================================================
 #
-# Expected input:
+# INPUT:
 #
-# image_dir/
+# images/
 #     image1.jpg
 #     image2.jpg
 #     image3.png
 #
-# annotation_dir/
+# annotations/
 #     image1.json
 #     image2.json
 #     image3.json
 #
 #
-# Output:
+# OUTPUT:
 #
-# output_dir/
+# output/
 # ├── images/
-# │   ├── train/
-# │   ├── val/
-# │   └── test/
+# │   ├── image1.jpg
+# │   ├── image2.jpg
+# │   └── image3.png
 # │
 # └── annotations/
-#     ├── instances_train.json
-#     ├── instances_val.json
-#     └── instances_test.json
+#     └── instances.json
 #
 #
-# Usage:
+# USAGE:
 #
 # python coco_converter.py \
 #     --image-dir /path/to/images \
@@ -47,22 +43,22 @@ from PIL import Image
 #     --output-dir /path/to/output
 #
 #
-# For XYXY annotations:
+# If input bbox is XYXY:
 #
-# python coco_converter.py \
-#     --image-dir /path/to/images \
-#     --annotation-dir /path/to/annotations \
-#     --output-dir /path/to/output \
-#     --bbox-format xyxy
+# [x1, y1, x2, y2]
+#
+# use:
+#
+# --bbox-format xyxy
 #
 #
-# For XYWH annotations:
+# If input bbox is already XYWH:
 #
-# python coco_converter.py \
-#     --image-dir /path/to/images \
-#     --annotation-dir /path/to/annotations \
-#     --output-dir /path/to/output \
-#     --bbox-format xywh
+# [x, y, width, height]
+#
+# use:
+#
+# --bbox-format xywh
 #
 # ============================================================
 
@@ -79,26 +75,23 @@ IMAGE_EXTENSIONS = {
     ".webp",
 }
 
-TRAIN_RATIO = 0.70
-VAL_RATIO = 0.20
-TEST_RATIO = 0.10
-
-RANDOM_SEED = 42
-
 CATEGORY_ID = 1
+
 CATEGORY_NAME = "ball"
+
 CATEGORY_SUPERCLASS = "object"
 
 
 # ============================================================
-# ARGUMENTS
+# COMMAND LINE ARGUMENTS
 # ============================================================
 
 def parse_arguments():
+
     parser = argparse.ArgumentParser(
         description=(
-            "Convert image + JSON annotations "
-            "into a COCO dataset."
+            "Convert image and JSON annotations "
+            "into a single COCO dataset."
         )
     )
 
@@ -106,29 +99,29 @@ def parse_arguments():
         "--image-dir",
         required=True,
         type=Path,
-        help="Folder containing input images."
+        help="Folder containing images."
     )
 
     parser.add_argument(
         "--annotation-dir",
         required=True,
         type=Path,
-        help=(
-            "Folder containing JSON annotations. "
-            "Annotation filename must match image filename."
-        )
+        help="Folder containing JSON annotations."
     )
 
     parser.add_argument(
         "--output-dir",
         required=True,
         type=Path,
-        help="Folder where the COCO dataset will be created."
+        help="Folder where COCO output will be created."
     )
 
     parser.add_argument(
         "--bbox-format",
-        choices=["xyxy", "xywh"],
+        choices=[
+            "xyxy",
+            "xywh",
+        ],
         default="xyxy",
         help=(
             "Input bounding box format. "
@@ -139,64 +132,49 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=RANDOM_SEED,
-        help="Random seed used for train/val/test split."
+        "--category-name",
+        default="ball",
+        help=(
+            "COCO category name. "
+            "Default: ball"
+        )
     )
 
     return parser.parse_args()
 
 
 # ============================================================
-# VALIDATE INPUT
+# VALIDATE DIRECTORIES
 # ============================================================
 
-def validate_input(args):
+def validate_directories(args):
 
     if not args.image_dir.exists():
+
         raise FileNotFoundError(
             f"Image directory does not exist:\n"
             f"{args.image_dir}"
         )
 
     if not args.image_dir.is_dir():
+
         raise NotADirectoryError(
             f"Image path is not a directory:\n"
             f"{args.image_dir}"
         )
 
     if not args.annotation_dir.exists():
+
         raise FileNotFoundError(
             f"Annotation directory does not exist:\n"
             f"{args.annotation_dir}"
         )
 
     if not args.annotation_dir.is_dir():
+
         raise NotADirectoryError(
             f"Annotation path is not a directory:\n"
             f"{args.annotation_dir}"
-        )
-
-    if not (
-        0 < TRAIN_RATIO < 1
-        and 0 < VAL_RATIO < 1
-        and 0 < TEST_RATIO < 1
-    ):
-        raise ValueError(
-            "Split ratios must be between 0 and 1."
-        )
-
-    if abs(
-        TRAIN_RATIO +
-        VAL_RATIO +
-        TEST_RATIO -
-        1.0
-    ) > 1e-6:
-
-        raise ValueError(
-            "TRAIN_RATIO + VAL_RATIO + TEST_RATIO "
-            "must equal 1.0"
         )
 
 
@@ -222,27 +200,110 @@ def find_images(image_dir):
 
 
 # ============================================================
-# CONVERT BBOX
+# FIND CORRESPONDING JSON
+# ============================================================
+
+def find_annotation(
+    image_path,
+    image_dir,
+    annotation_dir,
+):
+
+    relative_path = image_path.relative_to(
+        image_dir
+    )
+
+    # --------------------------------------------------------
+    # First try matching directory structure.
+    #
+    # Example:
+    #
+    # images/
+    #   folder1/
+    #       image1.jpg
+    #
+    # annotations/
+    #   folder1/
+    #       image1.json
+    # --------------------------------------------------------
+
+    expected_annotation = (
+        annotation_dir /
+        relative_path.with_suffix(".json")
+    )
+
+    if expected_annotation.exists():
+
+        return expected_annotation
+
+    # --------------------------------------------------------
+    # If there is no matching nested structure,
+    # search recursively by filename.
+    # --------------------------------------------------------
+
+    matches = list(
+        annotation_dir.rglob(
+            f"{image_path.stem}.json"
+        )
+    )
+
+    if len(matches) == 1:
+
+        return matches[0]
+
+    if len(matches) > 1:
+
+        print()
+        print(
+            "[WARNING] Multiple annotations found "
+            f"for: {image_path.name}"
+        )
+
+        for match in matches:
+
+            print(
+                f"          {match}"
+            )
+
+        print(
+            f"          Using: {matches[0]}"
+        )
+
+        return matches[0]
+
+    return None
+
+
+# ============================================================
+# CONVERT XYXY -> XYWH
 # ============================================================
 
 def convert_xyxy_to_xywh(rect):
 
     if not isinstance(rect, list):
+
         raise ValueError(
             f"Bounding box must be a list: {rect}"
         )
 
     if len(rect) != 4:
+
         raise ValueError(
-            f"Bounding box must contain 4 values: {rect}"
+            f"Bounding box must contain "
+            f"4 values: {rect}"
         )
 
-    x1, y1, x2, y2 = map(float, rect)
+    x1, y1, x2, y2 = map(
+        float,
+        rect
+    )
 
     width = x2 - x1
+
     height = y2 - y1
 
     if width <= 0 or height <= 0:
+
         raise ValueError(
             f"Invalid XYXY bounding box: {rect}"
         )
@@ -259,24 +320,45 @@ def convert_xyxy_to_xywh(rect):
 # EXTRACT BOUNDING BOXES
 # ============================================================
 
-def extract_bboxes(annotation, bbox_format):
+def extract_bboxes(
+    annotation,
+    bbox_format,
+):
 
-    data = annotation.get("data", {})
+    data = annotation.get(
+        "data",
+        {}
+    )
 
-    balls = data.get("ball", [])
+    balls = data.get(
+        "ball",
+        []
+    )
 
     bboxes = []
 
     for ball in balls:
 
-        entire = ball.get("entire", {})
+        entire = ball.get(
+            "entire",
+            {}
+        )
 
-        rect = entire.get("rect")
+        rect = entire.get(
+            "rect"
+        )
 
         if rect is None:
+
             continue
 
-        if not isinstance(rect, list) or len(rect) != 4:
+        if (
+            not isinstance(
+                rect,
+                list
+            )
+            or len(rect) != 4
+        ):
 
             print(
                 f"  [WARNING] Invalid bbox skipped: "
@@ -289,23 +371,32 @@ def extract_bboxes(annotation, bbox_format):
 
             if bbox_format == "xyxy":
 
-                bbox = convert_xyxy_to_xywh(rect)
+                bbox = convert_xyxy_to_xywh(
+                    rect
+                )
 
             else:
 
                 bbox = list(
-                    map(float, rect)
+                    map(
+                        float,
+                        rect
+                    )
                 )
 
                 if (
                     bbox[2] <= 0
                     or bbox[3] <= 0
                 ):
+
                     raise ValueError(
-                        f"Invalid XYWH bbox: {rect}"
+                        f"Invalid XYWH bounding box: "
+                        f"{rect}"
                     )
 
-            bboxes.append(bbox)
+            bboxes.append(
+                bbox
+            )
 
         except ValueError as e:
 
@@ -325,27 +416,46 @@ def get_image_dimensions(
     annotation,
 ):
 
-    dimensions = annotation.get("dimensions")
+    dimensions = annotation.get(
+        "dimensions"
+    )
+
+    # --------------------------------------------------------
+    # Use dimensions from annotation if available.
+    #
+    # Expected:
+    #
+    # "dimensions": [
+    #     height,
+    #     width
+    # ]
+    # --------------------------------------------------------
 
     if (
-        isinstance(dimensions, list)
+        isinstance(
+            dimensions,
+            list
+        )
         and len(dimensions) == 2
     ):
 
-        # Expected annotation format:
-        #
-        # dimensions: [height, width]
+        height = int(
+            dimensions[0]
+        )
 
-        height = int(dimensions[0])
-        width = int(dimensions[1])
+        width = int(
+            dimensions[1]
+        )
 
         return width, height
 
     # --------------------------------------------------------
-    # Fallback: read actual image dimensions
+    # Otherwise read actual image.
     # --------------------------------------------------------
 
-    with Image.open(image_path) as image:
+    with Image.open(
+        image_path
+    ) as image:
 
         width, height = image.size
 
@@ -353,248 +463,148 @@ def get_image_dimensions(
 
 
 # ============================================================
-# FIND ANNOTATION
+# GENERATE OUTPUT IMAGE NAME
 # ============================================================
 
-def find_annotation(
+def get_output_filename(
     image_path,
     image_dir,
-    annotation_dir,
 ):
 
-    relative_path = image_path.relative_to(
-        image_dir
+    relative_path = (
+        image_path.relative_to(
+            image_dir
+        )
     )
 
-    # First try to preserve any nested structure.
+    # --------------------------------------------------------
+    # Image directly inside input image directory.
     #
     # Example:
     #
-    # images/a/image1.jpg
-    # annotations/a/image1.json
-
-    matching_path = (
-        annotation_dir /
-        relative_path.with_suffix(".json")
-    )
-
-    if matching_path.exists():
-        return matching_path
-
-    # --------------------------------------------------------
-    # Fallback:
+    # images/image1.jpg
     #
-    # Search recursively by filename.
-    # --------------------------------------------------------
-
-    matches = list(
-        annotation_dir.rglob(
-            f"{image_path.stem}.json"
-        )
-    )
-
-    if len(matches) == 1:
-        return matches[0]
-
-    if len(matches) > 1:
-
-        print(
-            f"[WARNING] Multiple annotations found "
-            f"for {image_path.name}"
-        )
-
-        print(
-            f"          Using: {matches[0]}"
-        )
-
-        return matches[0]
-
-    return None
-
-
-# ============================================================
-# CREATE UNIQUE IMAGE NAME
-# ============================================================
-
-def get_unique_image_name(
-    image_path,
-    image_dir,
-):
-
-    relative_path = image_path.relative_to(
-        image_dir
-    )
-
-    # If image is directly inside image_dir:
+    # becomes:
     #
     # image1.jpg
-    #
-    # keep original name.
-    #
+    # --------------------------------------------------------
 
     if len(relative_path.parts) == 1:
+
         return image_path.name
 
     # --------------------------------------------------------
-    # For nested images, flatten the path.
+    # If nested folders exist, flatten them.
     #
     # Example:
     #
     # images/
-    #   class1/
+    #   folder1/
     #       image1.jpg
     #
     # becomes:
     #
-    # class1_image1.jpg
+    # folder1_image1.jpg
     # --------------------------------------------------------
 
-    parts = list(
-        relative_path.parts
-    )
+    folder_parts = relative_path.parts[:-1]
 
-    filename = parts[-1]
-
-    directory_parts = parts[:-1]
+    filename = relative_path.name
 
     prefix = "_".join(
-        directory_parts
+        folder_parts
     )
 
-    return f"{prefix}_{filename}"
+    return (
+        f"{prefix}_{filename}"
+    )
 
 
 # ============================================================
-# COLLECT IMAGE / ANNOTATION PAIRS
+# MAIN CONVERSION
 # ============================================================
 
-def collect_pairs(
-    image_dir,
-    annotation_dir,
-):
+def convert_to_coco(args):
 
     print()
-    print("=" * 70)
-    print("SEARCHING FOR IMAGES AND ANNOTATIONS")
-    print("=" * 70)
+    print("=" * 75)
+    print("GENERIC COCO CONVERSION")
+    print("=" * 75)
+
+    print()
+    print(
+        f"Images      : {args.image_dir}"
+    )
+
+    print(
+        f"Annotations : {args.annotation_dir}"
+    )
+
+    print(
+        f"Output      : {args.output_dir}"
+    )
+
+    print(
+        f"BBox format : {args.bbox_format.upper()}"
+    )
+
+    print(
+        f"Category    : {args.category_name}"
+    )
+
+    # ========================================================
+    # CREATE OUTPUT DIRECTORIES
+    # ========================================================
+
+    output_images = (
+        args.output_dir /
+        "images"
+    )
+
+    output_annotations = (
+        args.output_dir /
+        "annotations"
+    )
+
+    output_images.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    output_annotations.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # ========================================================
+    # FIND IMAGES
+    # ========================================================
 
     images = find_images(
-        image_dir
+        args.image_dir
     )
 
     if not images:
 
         raise RuntimeError(
-            "No images found in:\n"
-            f"{image_dir}"
+            f"No images found in:\n"
+            f"{args.image_dir}"
         )
-
-    pairs = []
-
-    missing_annotations = 0
-
-    for image_path in images:
-
-        annotation_path = find_annotation(
-            image_path,
-            image_dir,
-            annotation_dir,
-        )
-
-        if annotation_path is None:
-
-            print(
-                f"[MISSING LABEL] "
-                f"{image_path.name}"
-            )
-
-            missing_annotations += 1
-
-            continue
-
-        pairs.append({
-            "image": image_path,
-            "annotation": annotation_path,
-        })
 
     print()
     print(
-        f"Images found          : {len(images)}"
+        f"Images found: {len(images)}"
     )
 
-    print(
-        f"Valid image-label pairs: {len(pairs)}"
-    )
-
-    print(
-        f"Missing annotations    : "
-        f"{missing_annotations}"
-    )
-
-    if not pairs:
-
-        raise RuntimeError(
-            "No valid image/annotation pairs found."
-        )
-
-    return pairs
-
-
-# ============================================================
-# CREATE COCO DATASET
-# ============================================================
-
-def create_coco_dataset(
-    pairs,
-    split_name,
-    args,
-):
-
-    print()
-    print("=" * 70)
-    print(
-        f"CREATING COCO: {split_name.upper()}"
-    )
-    print("=" * 70)
-
-    # --------------------------------------------------------
-    # Output directories
-    #
-    # IMPORTANT:
-    #
-    # There are NO dataset/case folders underneath.
-    # --------------------------------------------------------
-
-    images_output_dir = (
-        args.output_dir /
-        "images" /
-        split_name
-    )
-
-    annotations_output_dir = (
-        args.output_dir /
-        "annotations"
-    )
-
-    images_output_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    annotations_output_dir.mkdir(
-        parents=True,
-        exist_ok=True
-    )
-
-    # --------------------------------------------------------
-    # COCO structure
-    # --------------------------------------------------------
+    # ========================================================
+    # CREATE COCO STRUCTURE
+    # ========================================================
 
     coco = {
 
         "info": {
             "description":
-                "COCO Dataset",
+                "COCO Object Detection Dataset",
             "version":
                 "1.0",
         },
@@ -607,43 +617,69 @@ def create_coco_dataset(
 
         "categories": [
             {
-                "id": CATEGORY_ID,
-                "name": CATEGORY_NAME,
+                "id":
+                    CATEGORY_ID,
+
+                "name":
+                    args.category_name,
+
                 "supercategory":
                     CATEGORY_SUPERCLASS,
             }
         ],
     }
 
+    # ========================================================
+    # IDS
+    # ========================================================
+
+    image_id = 1
+
     annotation_id = 1
 
-    copied_images = 0
-    skipped_images = 0
-
+    # Used to prevent filename collisions.
     used_filenames = set()
 
-    # --------------------------------------------------------
-    # Process images
-    # --------------------------------------------------------
+    successful_images = 0
 
-    for image_id, pair in enumerate(
-        pairs,
-        start=1
-    ):
+    skipped_images = 0
 
-        image_path = pair["image"]
+    missing_annotations = 0
 
-        annotation_path = pair[
-            "annotation"
-        ]
+    # ========================================================
+    # PROCESS IMAGES
+    # ========================================================
 
+    for image_path in images:
+
+        print()
         print(
-            f"[{image_id}/{len(pairs)}] "
+            f"[{image_id}/{len(images)}] "
             f"{image_path.name}"
         )
 
         # ----------------------------------------------------
-        # Read JSON
+        # Find annotation
+        # ----------------------------------------------------
+
+        annotation_path = find_annotation(
+            image_path,
+            args.image_dir,
+            args.annotation_dir,
+        )
+
+        if annotation_path is None:
+
+            print(
+                "  [MISSING ANNOTATION]"
+            )
+
+            missing_annotations += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Read annotation
         # ----------------------------------------------------
 
         try:
@@ -654,12 +690,14 @@ def create_coco_dataset(
                 encoding="utf-8"
             ) as file:
 
-                annotation = json.load(file)
+                annotation = json.load(
+                    file
+                )
 
         except Exception as e:
 
             print(
-                f"  [ERROR] Could not read annotation:"
+                "  [ERROR] Could not read JSON:"
             )
 
             print(
@@ -675,7 +713,7 @@ def create_coco_dataset(
             continue
 
         # ----------------------------------------------------
-        # Get image size
+        # Get dimensions
         # ----------------------------------------------------
 
         try:
@@ -690,8 +728,8 @@ def create_coco_dataset(
         except Exception as e:
 
             print(
-                f"  [ERROR] Could not determine "
-                f"image dimensions:"
+                "  [ERROR] Could not get "
+                "image dimensions:"
             )
 
             print(
@@ -703,53 +741,65 @@ def create_coco_dataset(
             continue
 
         # ----------------------------------------------------
-        # Generate flattened filename
+        # Generate output filename
         # ----------------------------------------------------
 
-        unique_name = get_unique_image_name(
-            image_path,
-            args.image_dir,
+        output_filename = (
+            get_output_filename(
+                image_path,
+                args.image_dir,
+            )
         )
 
         # ----------------------------------------------------
-        # Prevent filename collision
+        # Prevent filename collisions
         # ----------------------------------------------------
 
-        if unique_name in used_filenames:
+        if output_filename in used_filenames:
 
             stem = Path(
-                unique_name
+                output_filename
             ).stem
 
             suffix = Path(
-                unique_name
+                output_filename
             ).suffix
 
             counter = 2
 
+            new_filename = (
+                f"{stem}_{counter}"
+                f"{suffix}"
+            )
+
             while (
-                f"{stem}_{counter}{suffix}"
+                new_filename
                 in used_filenames
             ):
 
                 counter += 1
 
-            unique_name = (
-                f"{stem}_{counter}{suffix}"
+                new_filename = (
+                    f"{stem}_{counter}"
+                    f"{suffix}"
+                )
+
+            output_filename = (
+                new_filename
             )
 
         used_filenames.add(
-            unique_name
-        )
-
-        destination = (
-            images_output_dir /
-            unique_name
+            output_filename
         )
 
         # ----------------------------------------------------
         # Copy image
         # ----------------------------------------------------
+
+        destination = (
+            output_images /
+            output_filename
+        )
 
         try:
 
@@ -761,7 +811,7 @@ def create_coco_dataset(
         except Exception as e:
 
             print(
-                f"  [ERROR] Could not copy image:"
+                "  [ERROR] Could not copy image:"
             )
 
             print(
@@ -772,9 +822,9 @@ def create_coco_dataset(
 
             continue
 
-        # ----------------------------------------------------
-        # Add image to COCO
-        # ----------------------------------------------------
+        # ====================================================
+        # ADD IMAGE TO COCO
+        # ====================================================
 
         coco["images"].append({
 
@@ -782,7 +832,7 @@ def create_coco_dataset(
                 image_id,
 
             "file_name":
-                unique_name,
+                output_filename,
 
             "width":
                 width,
@@ -791,40 +841,52 @@ def create_coco_dataset(
                 height,
         })
 
-        # ----------------------------------------------------
-        # Extract bounding boxes
-        # ----------------------------------------------------
+        # ====================================================
+        # GET BOUNDING BOXES
+        # ====================================================
 
         bboxes = extract_bboxes(
             annotation,
             args.bbox_format,
         )
 
-        # ----------------------------------------------------
-        # Add annotations
-        # ----------------------------------------------------
+        print(
+            f"  Bounding boxes: "
+            f"{len(bboxes)}"
+        )
+
+        # ====================================================
+        # ADD ANNOTATIONS
+        # ====================================================
 
         for bbox in bboxes:
 
             x = bbox[0]
+
             y = bbox[1]
+
             bbox_width = bbox[2]
+
             bbox_height = bbox[3]
 
             # ------------------------------------------------
-            # Optional clipping
-            #
-            # Prevent boxes from extending outside image.
+            # Keep bbox inside image boundaries.
             # ------------------------------------------------
 
             x = max(
                 0,
-                min(x, width)
+                min(
+                    x,
+                    width
+                )
             )
 
             y = max(
                 0,
-                min(y, height)
+                min(
+                    y,
+                    height
+                )
             )
 
             bbox_width = min(
@@ -841,12 +903,17 @@ def create_coco_dataset(
                 bbox_width <= 0
                 or bbox_height <= 0
             ):
+
                 print(
-                    "  [WARNING] Bbox became invalid "
+                    "  [WARNING] Invalid bbox "
                     "after clipping. Skipped."
                 )
 
                 continue
+
+            # ------------------------------------------------
+            # COCO annotation
+            # ------------------------------------------------
 
             coco["annotations"].append({
 
@@ -876,15 +943,21 @@ def create_coco_dataset(
 
             annotation_id += 1
 
-        copied_images += 1
+        # ----------------------------------------------------
+        # Next image
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # Save COCO JSON
-    # --------------------------------------------------------
+        image_id += 1
+
+        successful_images += 1
+
+    # ========================================================
+    # SAVE COCO JSON
+    # ========================================================
 
     json_path = (
-        annotations_output_dir /
-        f"instances_{split_name}.json"
+        output_annotations /
+        "instances.json"
     )
 
     with open(
@@ -899,229 +972,69 @@ def create_coco_dataset(
             indent=2
         )
 
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL SUMMARY
+    # ========================================================
 
     print()
-    print("-" * 70)
+    print("=" * 75)
+    print("CONVERSION COMPLETE")
+    print("=" * 75)
+
+    print()
 
     print(
-        f"Images copied       : "
-        f"{copied_images}"
+        f"Images found          : "
+        f"{len(images)}"
     )
 
     print(
-        f"Images skipped      : "
+        f"Images converted      : "
+        f"{successful_images}"
+    )
+
+    print(
+        f"Missing annotations   : "
+        f"{missing_annotations}"
+    )
+
+    print(
+        f"Images skipped        : "
         f"{skipped_images}"
     )
 
     print(
-        f"COCO images         : "
+        f"COCO images           : "
         f"{len(coco['images'])}"
     )
 
     print(
-        f"COCO annotations    : "
+        f"COCO annotations      : "
         f"{len(coco['annotations'])}"
     )
 
-    print(
-        f"JSON saved          : "
-        f"{json_path}"
-    )
-
-    return coco
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    args = parse_arguments()
-
-    # --------------------------------------------------------
-    # Validate input
-    # --------------------------------------------------------
-
-    validate_input(args)
-
     print()
-    print("=" * 70)
-    print("GENERIC COCO DATASET CONVERTER")
-    print("=" * 70)
 
-    print()
     print(
-        f"Image directory      : "
-        f"{args.image_dir}"
+        f"Images output:"
     )
 
     print(
-        f"Annotation directory : "
-        f"{args.annotation_dir}"
-    )
-
-    print(
-        f"Output directory     : "
-        f"{args.output_dir}"
-    )
-
-    print(
-        f"Bounding box format  : "
-        f"{args.bbox_format.upper()}"
-    )
-
-    print(
-        f"Random seed          : "
-        f"{args.seed}"
+        f"  {output_images}"
     )
 
     print()
-    print(
-        "Split ratio:"
-    )
 
     print(
-        f"  Train = {TRAIN_RATIO:.0%}"
+        f"COCO JSON:"
     )
 
     print(
-        f"  Val   = {VAL_RATIO:.0%}"
-    )
-
-    print(
-        f"  Test  = {TEST_RATIO:.0%}"
-    )
-
-    # --------------------------------------------------------
-    # Collect pairs
-    # --------------------------------------------------------
-
-    pairs = collect_pairs(
-        args.image_dir,
-        args.annotation_dir,
-    )
-
-    # --------------------------------------------------------
-    # Random split
-    # --------------------------------------------------------
-
-    random.seed(
-        args.seed
-    )
-
-    random.shuffle(
-        pairs
-    )
-
-    total = len(pairs)
-
-    train_count = int(
-        total *
-        TRAIN_RATIO
-    )
-
-    val_count = int(
-        total *
-        VAL_RATIO
-    )
-
-    train_pairs = pairs[
-        :train_count
-    ]
-
-    val_pairs = pairs[
-        train_count:
-        train_count +
-        val_count
-    ]
-
-    test_pairs = pairs[
-        train_count +
-        val_count:
-    ]
-
-    # --------------------------------------------------------
-    # Print split
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("DATASET SPLIT")
-    print("=" * 70)
-
-    print()
-    print(
-        f"Total : {total}"
-    )
-
-    print(
-        f"Train : {len(train_pairs)} "
-        f"({len(train_pairs) / total:.2%})"
-    )
-
-    print(
-        f"Val   : {len(val_pairs)} "
-        f"({len(val_pairs) / total:.2%})"
-    )
-
-    print(
-        f"Test  : {len(test_pairs)} "
-        f"({len(test_pairs) / total:.2%})"
-    )
-
-    # --------------------------------------------------------
-    # Create COCO train
-    # --------------------------------------------------------
-
-    create_coco_dataset(
-        train_pairs,
-        "train",
-        args,
-    )
-
-    # --------------------------------------------------------
-    # Create COCO validation
-    # --------------------------------------------------------
-
-    create_coco_dataset(
-        val_pairs,
-        "val",
-        args,
-    )
-
-    # --------------------------------------------------------
-    # Create COCO test
-    # --------------------------------------------------------
-
-    create_coco_dataset(
-        test_pairs,
-        "test",
-        args,
-    )
-
-    # --------------------------------------------------------
-    # Final output
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("CONVERSION COMPLETE")
-    print("=" * 70)
-
-    print()
-    print(
-        "COCO dataset created at:"
-    )
-
-    print(
-        f"  {args.output_dir}"
+        f"  {json_path}"
     )
 
     print()
+
     print(
         "Output structure:"
     )
@@ -1131,20 +1044,19 @@ def main():
 {args.output_dir}/
 │
 ├── images/
-│   ├── train/
-│   ├── val/
-│   └── test/
+│   ├── image1.jpg
+│   ├── image2.jpg
+│   ├── image3.jpg
+│   └── ...
 │
 └── annotations/
-    ├── instances_train.json
-    ├── instances_val.json
-    └── instances_test.json
+    └── instances.json
 """
     )
 
     print(
-        "Original images and annotations were "
-        "not modified."
+        "Original images and annotations "
+        "were not modified."
     )
 
 
@@ -1152,6 +1064,18 @@ def main():
 # RUN
 # ============================================================
 
+def main():
+
+    args = parse_arguments()
+
+    validate_directories(
+        args
+    )
+
+    convert_to_coco(
+        args
+    )
+
+
 if __name__ == "__main__":
     main()
-```
