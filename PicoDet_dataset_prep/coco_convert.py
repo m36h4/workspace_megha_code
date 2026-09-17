@@ -85,7 +85,7 @@ def parse_args():
         help="Path to the output folder where the COCO dataset will be created.",
     )
     parser.add_argument(
-        "--bbox-format", choices=["xyxy", "xywh"], default="xyxy",
+        "--bbox-format", choices=["xyxy", "xywh"], default="xywh",
         help="Format of the 'rect' field in the source annotations. "
              "xyxy = [x1,y1,x2,y2], xywh = [x,y,width,height].",
     )
@@ -221,12 +221,18 @@ def get_image_dimensions(annotation_data, image_path):
 # ============================================================
 
 def build_coco(pairs, bbox_format, category_name, category_id,
-                split_name, output_root):
+                split_name, output_root, flat_images=False):
     """
     Copy images + build a COCO json for one split.
+
+    If flat_images is True, images are copied directly into
+    output_root/images/ with no split subfolder (used for --no-split).
     """
 
-    images_output_dir = output_root / "images" / split_name
+    if flat_images:
+        images_output_dir = output_root / "images"
+    else:
+        images_output_dir = output_root / "images" / split_name
     annotations_output_dir = output_root / "annotations"
 
     images_output_dir.mkdir(parents=True, exist_ok=True)
@@ -366,7 +372,7 @@ def main():
     if args.no_split:
         build_coco(
             pairs, args.bbox_format, args.category_name, args.category_id,
-            "all", output_root,
+            "all", output_root, flat_images=True,
         )
     else:
         random.seed(args.seed)
@@ -400,7 +406,7 @@ def main():
     print(f"{output_root}/")
     print("├── images/")
     if args.no_split:
-        print("│   └── all/")
+        print("│   └── (images copied directly here)")
     else:
         print("│   ├── train/")
         print("│   ├── val/")
