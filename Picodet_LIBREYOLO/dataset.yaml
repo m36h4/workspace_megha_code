@@ -1,0 +1,9 @@
+path: dataset   # dataset root
+train: images/train                  # image folder for the split
+val: images/val
+annotations:
+  train: annotations/train.json
+  val: annotations/val.json
+names:
+  0: basketball
+  1: volleyball
