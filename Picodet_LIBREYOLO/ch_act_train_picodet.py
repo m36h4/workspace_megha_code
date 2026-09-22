@@ -11,7 +11,8 @@ import argparse
 import torch
 from libreyolo import LibreYOLO
 
-from picodet_activation import ACTS, GATES, set_activation  # keep this file next to the script
+import picodet_letterbox                                              # ADD THIS LINE
+from picodet_activation import ACTS, GATES, set_activation
 
 
 def main():
@@ -24,9 +25,9 @@ def main():
                    help="replace ESNet's SE hard-sigmoid gate (COCO weights assume 'default')")
     p.add_argument("--device", default="", help="'' = auto, 'cpu', '0', '0,1' ...")
     p.add_argument("--epochs", type=int, default=300)
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--lr0", type=float, default=0.01)
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--lr0", type=float, default=0.1)
+    p.add_argument("--workers", type=int, default=8)
     args = p.parse_args()
 
     print("torch", torch.__version__, "| CUDA available:", torch.cuda.is_available())
@@ -41,12 +42,12 @@ def main():
         lr0=args.lr0,
         device=args.device,
         workers=args.workers,
-        # imgsz left unset: Python API uses the checkpoint's native size (320 for s)
+        imgsz=(320, 448), #left unset: Python API uses the checkpoint's native size (320 for s)
         # amp defaults to True; it only applies on CUDA, so it's harmless on CPU
     )
     print(results)
 
-    metrics = model.val(data=args.data)
+    metrics = model.val(data=args.data, imgsz=(320, 448))
     print("mAP50-95:", metrics["metrics/mAP50-95"], "| mAP50:", metrics["metrics/mAP50"])
 
 
