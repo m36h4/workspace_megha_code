@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 from libreyolo.models.picodet.model import LibrePICODET
 from libreyolo.models.picodet.nn import CSPPAN, SIZE_SPEC, LibrePICODETModel
+import picodet_letterbox                                              # ADD THIS LINE
 
 from picodet_activation import ACTS, GATES, make_act, make_gate, set_activation  # keep this file next to the script
 
@@ -304,9 +305,9 @@ def main():
                    help="SE-gate replacing the hard sigmoid (LCNet SE blocks; ESNet only if used)")
     p.add_argument("--device", default="")
     p.add_argument("--epochs", type=int, default=300)
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--lr0", type=float, default=0.01)
-    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--batch", type=int, default=64)
+    p.add_argument("--lr0", type=float, default=0.1)
+    p.add_argument("--workers", type=int, default=8)
     args = p.parse_args()
 
     set_activation(args.act, gate=args.gate)  # must run before the model is built
@@ -317,8 +318,8 @@ def main():
     print(f"backbone params: {n_bb:.2f}M | total: {n_all:.2f}M | input size: {model.input_size}")
 
     print(model.train(data=args.data, epochs=args.epochs, batch=args.batch, lr0=args.lr0,
-                      device=args.device, workers=args.workers))
-    print(model.val(data=args.data))
+                      device=args.device, workers=args.workers, imgsz=(320, 448)))
+    print(model.val(data=args.data, imgsz=(320, 448)))
 
 
 if __name__ == "__main__":  # guard needed for dataloader workers / multi-GPU spawn
