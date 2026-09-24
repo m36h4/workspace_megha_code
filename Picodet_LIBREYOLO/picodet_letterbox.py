@@ -374,3 +374,43 @@ _picodet_trainer.PICODETTrainer.create_transforms = lambda self: (
 )
 LibrePICODET.val_preprocessor_class = PICODETLetterboxValPreprocessor
 _picodet_utils.preprocess_numpy = letterbox_preprocess_numpy
+
+
+# ---------------------------------------------------------------------------
+# 4. THE ACTUAL BUG: PicoDet's own _postprocess() never forwarded the
+#    `letterbox` flag the validator passes it, and postprocess.picodet.postprocess()
+#    always un-scales predictions with a two-axis STRETCH formula regardless (see its
+#    own comment: "PICODET uses simple resize, not letterbox"). Meanwhile the GT
+#    reconstruction (PICODETLetterboxValPreprocessor.letterbox_scale, above) correctly
+#    un-letterboxes. Predictions and GT were therefore being rescaled with two
+#    DIFFERENT formulas every single validation step -- tanking IoU between them
+#    regardless of how well the model was actually trained. This is very likely why
+#    ground-truth boxes looked correct in visualize_letterbox.py while mAP/AR stayed
+#    catastrophically low even with every augmentation toggle off.
+# ---------------------------------------------------------------------------
+
+def _letterbox_aware_postprocess(self, output, conf_thres, iou_thres, original_size,
+                                 max_det=100, ratio=1.0, **kwargs):
+    input_size = kwargs.get("input_size", self.input_size)
+    target_h, target_w = _target_hw(input_size)
+    orig_w, orig_h = original_size  # matches the framework's own (w, h) convention here
+
+    # original_size=None -> canvas-space boxes, no rescale applied inside the decoder;
+    # we invert our own letterbox instead of its stretch formula.
+    result = _picodet_decode(
+        output, conf_thres=conf_thres, iou_thres=iou_thres,
+        input_size=input_size, original_size=None, max_det=max_det,
+    )
+    if result["num_detections"]:
+        r = min(target_h / orig_h, target_w / orig_w)  # SAME formula as letterbox_scale/__call__
+        boxes = np.asarray(result["boxes"], dtype=np.float32) / r  # top-left pad -> no offset
+        boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, orig_w)
+        boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, orig_h)
+        result["boxes"] = torch.from_numpy(boxes)
+        result["scores"] = torch.as_tensor(result["scores"], dtype=torch.float32)
+        result["classes"] = torch.as_tensor(result["classes"], dtype=torch.int64)
+    return result
+
+
+LibrePICODET._postprocess = _letterbox_aware_postprocess
+
