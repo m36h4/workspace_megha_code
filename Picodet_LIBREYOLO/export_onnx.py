@@ -67,11 +67,13 @@ def main():
     out_path = args.out or args.weights.rsplit(".", 1)[0] + f"_{args.imgsz[0]}x{args.imgsz[1]}.onnx"
 
     model = load_model(args)
-    net = model.model.eval()
+    net = model.model.eval().to("cpu")  # export from CPU: GPU-loaded checkpoints (your case) would
+                                        # otherwise crash with a device mismatch against the dummy
+                                        # input, and CPU tracing avoids CUDA-specific op quirks too.
     net.head.export = True  # single decoded (B, N, 4+nc) tensor instead of the raw per-level lists
 
     h, w = args.imgsz
-    dummy = torch.randn(1, 3, h, w)
+    dummy = torch.randn(1, 3, h, w)  # CPU, matching net above
 
     with torch.no_grad():
         torch_out = net(dummy)
