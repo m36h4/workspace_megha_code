@@ -26,6 +26,19 @@ from picodet_eval import (
 )
 from picodet_letterbox import letterbox_np
 
+# Preprocessing conventions for different exported models. PicoDet/LibreYOLO converts
+# BGR->RGB then subtracts an RGB-ordered ImageNet mean. NanoDet-Plus (and many
+# mmdetection-lineage configs) do NOT convert to RGB -- they normalize directly in the
+# BGR order cv2 loads images in, with a BGR-ordered mean/std to match. Same three
+# ImageNet constants, opposite order -- confirmed against a real NanoDet-Plus training
+# config (ball_exp2_ch48_320x480.yml): mean=[103.53,116.28,123.675], std=[57.375,57.12,
+# 58.395], BGR order, no channel swap. Getting this wrong doesn't crash -- it silently
+# swaps red and blue on every image and gives plausible-looking wrong numbers.
+PREPROC_PRESETS = {
+    "picodet": {"bgr": False, "mean": (123.675, 116.28, 103.53), "std": (58.395, 57.12, 57.375)},
+    "nanodetplus": {"bgr": True, "mean": (103.53, 116.28, 123.675), "std": (57.375, 57.12, 58.395)},
+}
+
 
 def numpy_nms(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> np.ndarray:
     """Standard greedy NMS, single class. Returns indices to keep, highest score first."""
@@ -68,11 +81,15 @@ def decode_onnx_output(raw: np.ndarray, conf_thres: float, nms_iou: float, max_d
 
 
 def run_onnx_inference(onnx_path: str, images: dict, imgsz, conf_floor: float,
-                       nms_iou: float, max_det: int):
+                       nms_iou: float, max_det: int, preproc: str = "picodet"):
     """Same contract as picodet_eval.run_inference: returns image_id -> [x1,y1,x2,y2,score,cls]
-    in ORIGINAL image pixel coordinates."""
-    from libreyolo.models.picodet.utils import IMAGENET_MEAN, IMAGENET_STD
+    in ORIGINAL image pixel coordinates. ``preproc`` selects a PREPROC_PRESETS entry --
+    use "nanodetplus" for a NanoDet-Plus export, "picodet" (default) for PicoDet."""
     from libreyolo.utils.image_loader import ImageLoader
+
+    cfg = PREPROC_PRESETS[preproc]
+    mean = np.array(cfg["mean"], dtype=np.float32)
+    std = np.array(cfg["std"], dtype=np.float32)
 
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     input_name = sess.get_inputs()[0].name
@@ -82,9 +99,12 @@ def run_onnx_inference(onnx_path: str, images: dict, imgsz, conf_floor: float,
     for img_id, path in images.items():
         img = ImageLoader.load(path, color_format="auto")
         orig_w, orig_h = img.size
-        canvas, ratio, _, _ = letterbox_np(np.array(img), imgsz)
+        img_arr = np.array(img)  # RGB, from PIL
+        if cfg["bgr"]:
+            img_arr = img_arr[:, :, ::-1]  # RGB -> BGR, matching NanoDet-Plus's own convention
+        canvas, ratio, _, _ = letterbox_np(img_arr, imgsz)
         arr = canvas.astype(np.float32)
-        arr = (arr - np.array(IMAGENET_MEAN, dtype=np.float32)) / np.array(IMAGENET_STD, dtype=np.float32)
+        arr = (arr - mean) / std
         chw = arr.transpose(2, 0, 1)[None, ...].astype(np.float32)
 
         raw = sess.run(None, {input_name: chw})[0][0]  # drop batch dim -> (N, 4+nc)
@@ -104,6 +124,10 @@ def main():
     p.add_argument("--onnx", required=True)
     p.add_argument("--imgsz", type=int, nargs=2, default=[320, 480], metavar=("H", "W"),
                    help="MUST match the size export_onnx.py baked into this graph")
+    p.add_argument("--preproc", default="picodet", choices=sorted(PREPROC_PRESETS),
+                   help="preprocessing convention: 'picodet' (RGB, LibreYOLO's ImageNet "
+                        "mean/std) or 'nanodetplus' (raw BGR, NanoDet-Plus's mean/std). "
+                        "Using the wrong one silently swaps red/blue -- see module docstring.")
     p.add_argument("--iou", type=float, default=0.5)
     p.add_argument("--conf", type=float, default=0.25)
     p.add_argument("--iou-sweep", type=float, nargs="+", default=[0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.9])
@@ -121,7 +145,7 @@ def main():
           f"classes={class_names}")
 
     preds = run_onnx_inference(args.onnx, images, tuple(args.imgsz), args.conf_floor,
-                               args.nms_iou, args.max_det)
+                               args.nms_iou, args.max_det, preproc=args.preproc)
 
     report_at_threshold(preds, gts, args.iou, args.conf, class_names)
     iou_sweep(preds, gts, args.iou_sweep, args.conf)
