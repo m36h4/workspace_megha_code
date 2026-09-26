@@ -45,6 +45,9 @@ def load_model(args):
     if args.arch == "esnet":
         from libreyolo.models.picodet.model import LibrePICODET
         return LibrePICODET(args.weights, size=args.size)
+    elif args.arch == "esnet_headslim":
+        from picodet_esnet_headslim import PicoDetHeadSlim
+        return PicoDetHeadSlim(args.weights, size=args.size)
     else:
         from picodet_lcnet_backbone import PicoDetLCNet
         return PicoDetLCNet(args.weights, size=args.size, lcnet_scale=args.lcnet_scale,
@@ -292,7 +295,7 @@ def main():
     p.add_argument("--data", required=True)
     p.add_argument("--split", default="val")
     p.add_argument("--weights", required=True)
-    p.add_argument("--arch", required=True, choices=["esnet", "lcnet"])
+    p.add_argument("--arch", required=True, choices=["esnet", "esnet_headslim", "lcnet"])
     p.add_argument("--size", default="s", choices=["s", "m", "l"])
     p.add_argument("--lcnet-scale", type=float, default=0.75)
     p.add_argument("--act", default="hswish")
