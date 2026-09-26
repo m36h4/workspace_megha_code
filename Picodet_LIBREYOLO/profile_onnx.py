@@ -74,8 +74,9 @@ def time_onnx_inference(onnx_path: str, imgsz_hw, device: str, batch: int,
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--onnx", required=True)
-    p.add_argument("--imgsz", type=int, nargs=2, required=True, metavar=("H", "W"),
-                   help="MUST match the size baked in by export_onnx.py (e.g. 320 480)")
+    p.add_argument("--imgsz", type=int, nargs=2, default=[320, 480], metavar=("H", "W"),
+                   help="expected size -- checked against the graph's own actual input "
+                        "shape; a mismatch is reported, not silently ignored")
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--warmup", type=int, default=20)
@@ -83,8 +84,19 @@ def main():
     args = p.parse_args()
 
     h, w = args.imgsz
+    sess_probe = ort.InferenceSession(args.onnx, providers=["CPUExecutionProvider"])
+    shape = sess_probe.get_inputs()[0].shape
+    dims = [d for d in shape if isinstance(d, int)]
+    real_h, real_w = (dims[-2], dims[-1]) if len(dims) >= 2 else (None, None)
+
     print(f"ONNX file    : {args.onnx}")
-    print(f"Input size   : {h}x{w}  (H, W)")
+    print(f"Requested    : {h}x{w}  (H, W, from --imgsz)")
+    print(f"Graph's ACTUAL input shape: {shape}  -> (h,w)=({real_h},{real_w})")
+    if (real_h, real_w) != (h, w):
+        print(f"*** MISMATCH: --imgsz says {h}x{w} but the graph is actually traced at "
+              f"{real_h}x{real_w}. Using the graph's REAL shape below -- if that's not "
+              f"the file you meant to profile, stop and check which .onnx this is. ***")
+        h, w = real_h, real_w
     print("-" * 60)
 
     macs, params = profile_macs_params(args.onnx)
