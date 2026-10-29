@@ -24,3 +24,4 @@ for i in range(parts):
     folder = os.path.join(src, f"part_{i+1}")
     print(f"part_{i+1}: {len(os.listdir(folder))} files")
 PY
+find /home/test_mohit/workspace_mohit/BallDetection/oct12/dataset/part_{1,2,3} -maxdepth 1 -type f | wc -l
