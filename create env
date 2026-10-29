@@ -1,0 +1,68 @@
+Run these in order.
+
+**On the source machine**
+
+1. Export the full environment (with pip packages, channels, and exact builds):
+```
+conda activate myenv
+conda env export --name myenv > environment.yml
+```
+
+2. Also save a cross-platform-safe version (no build strings) and an explicit lockfile for same-OS cloning:
+```
+conda env export --name myenv --no-builds > environment_nobuilds.yml
+conda list --name myenv --explicit > spec-file.txt
+```
+
+3. Save your base env and conda config too:
+```
+conda list --name base --explicit > base-spec.txt
+cp ~/.condarc condarc_backup
+```
+
+4. Capture pip packages separately (in case the YAML misses any, e.g. git or editable installs):
+```
+conda activate myenv
+pip freeze > requirements.txt
+```
+
+5. Copy `environment.yml`, `environment_nobuilds.yml`, `spec-file.txt`, `base-spec.txt`, `requirements.txt`, and `condarc_backup` to the new machine (scp, USB, cloud, etc.).
+
+**On the new machine**
+
+1. Install Miniconda (same major version if possible), then restore your config:
+```
+cp condarc_backup ~/.condarc
+```
+
+2. Recreate the environment. Pick one:
+
+- Same OS and architecture (most exact):
+```
+conda create --name myenv --file spec-file.txt
+```
+- Same OS, from YAML:
+```
+conda env create -f environment.yml
+```
+- Different OS or architecture:
+```
+conda env create -f environment_nobuilds.yml
+```
+
+3. Verify:
+```
+conda activate myenv
+conda list --export > new_env.txt
+```
+Compare against the original with `diff` on the output of `conda list --export` from the source machine.
+
+**Things conda won't carry over**
+
+- Editable installs (`pip install -e`) and local packages: reinstall from their source directories.
+- Environment variables set with `conda env config vars`: these are in the YAML under `variables`, but check them.
+- Activation scripts in `$CONDA_PREFIX/etc/conda/activate.d/`: copy these manually.
+- CUDA/GPU drivers: install the matching NVIDIA driver on the new machine.
+- Private channels or credentials: ensure `.condarc` channels and any tokens are set up.
+
+If you tell me both operating systems, I can narrow this to the single best path.
