@@ -115,18 +115,23 @@ def main():
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr0", type=float, default=0.1)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--resume", default=None, metavar="LAST_PT",
+                    help="continue an interrupted run from its last.pt (same --preset/--epochs/--batch/--lr0 as the original run)")
     ap.add_argument("--profile-only", action="store_true")
     a = ap.parse_args()
     set_activation(a.act, gate=a.gate)
     p = PRESETS[a.preset]
-    model = PicoDetTiny(size="s", nb_classes=1, scale=p["scale"], s16=p["s16"], neck=p["neck"], k=p["k"])
+    if a.resume:
+        model = load_tiny(a.resume, size="s", preset=a.preset)      # builds the tiny net, loads last.pt
+    else:
+        model = PicoDetTiny(size="s", nb_classes=1, scale=p["scale"], s16=p["s16"], neck=p["neck"], k=p["k"])
     if a.profile_only:
         from torchinfo import summary
         s = summary(model.model.eval(), input_size=(1, 3, *a.imgsz), verbose=0)
         print(f"{a.preset} {p}: {s.total_mult_adds/1e9:.4f} GMACs, {2*s.total_mult_adds/1e9:.4f} GFLOPs, {s.total_params:,} params")
         return
     print(model.train(data=a.data, epochs=a.epochs, batch=a.batch, lr0=a.lr0, device=a.device,
-                      workers=a.workers, imgsz=tuple(a.imgsz)))
+                      workers=a.workers, imgsz=tuple(a.imgsz), resume=bool(a.resume)))
     print(model.val(data=a.data, imgsz=tuple(a.imgsz)))
 
 
